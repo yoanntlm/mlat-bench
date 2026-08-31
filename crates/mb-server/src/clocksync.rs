@@ -38,6 +38,17 @@ const MAX_PRED_SIGMA_S: f64 = 2e-6;
 const REFIT_EVERY: u32 = 8;
 
 impl PairModel {
+    /// (observation count, estimated pairwise offset ppm) for status export
+    /// (sync.json — existing monitoring tools read the oracle's shape).
+    pub fn status(&self) -> (usize, f64) {
+        let ppm = self
+            .cached
+            .as_ref()
+            .map(|f| (f.beta - 1.0) * 1e6)
+            .unwrap_or(0.0);
+        (self.obs.len(), ppm)
+    }
+
     pub fn push(&mut self, t_from: f64, t_to: f64) {
         self.obs.push_back((t_from, t_to));
         self.stale += 1;
@@ -85,9 +96,10 @@ impl PairModel {
             self.stale = 0;
         }
         let f = self.cached.as_ref().expect("just set");
-        // Prediction interval: inflates for young or extrapolating models —
-        // exactly the phases where km-scale errors hid behind tiny fit
-        // residuals (bench, seeds 42 + 1337).
+        let _ = f.n; // (fields also served via status())
+                     // Prediction interval: inflates for young or extrapolating models —
+                     // exactly the phases where km-scale errors hid behind tiny fit
+                     // residuals (bench, seeds 42 + 1337).
         let da = t_from - f.mean_a;
         let infl = (1.0 + 1.0 / f.n as f64 + da * da / f.sxx).sqrt();
         let sigma_pred = f.sigma_fit * infl;

@@ -39,6 +39,7 @@ struct SyncPoint {
 struct Group {
     created: Instant,
     icao: Icao,
+    df17: bool,
     /// (receiver idx, arrival time in that receiver's clock s, output clock
     /// at insertion). The insertion stamp rides along because one content key
     /// can hold SEVERAL transmissions — see solve_group.
@@ -59,7 +60,25 @@ struct RxBias {
     n: u32,
 }
 
+/// A published fix, fanned out to CSV + SBS + subscribed clients.
+pub struct Published {
+    pub sbs_line: String,
+    pub result_line: String,
+}
+
 pub struct State {
+    /// Fan-out for accepted fixes (SBS listeners + result-subscribed
+    /// clients). Lossy by design: a slow consumer drops, the solver never
+    /// blocks.
+    pub publish: tokio::sync::broadcast::Sender<std::sync::Arc<Published>>,
+    /// Last CPR-decoded position per ADS-B aircraft + output-clock stamp —
+    /// the self-truth reference (the aircraft's own broadcast position).
+    adsb_pos: HashMap<Icao, (Geodetic, f64)>,
+    /// When set, DF17 frames are multilaterated too and scored against the
+    /// aircraft's own ADS-B position — real-world accuracy without external
+    /// ground truth. Rows go here, NOT into results.csv.
+    self_truth_csv: Option<std::io::BufWriter<std::fs::File>>,
+    pub mlat_adsb: bool,
     rx_bias: Vec<RxBias>,
     pub receivers: Vec<ReceiverInfo>,
     reference: Option<usize>,
@@ -80,8 +99,21 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(csv_path: &std::path::Path, time_scale: f64) -> anyhow::Result<Self> {
+    pub fn new(
+        csv_path: &std::path::Path,
+        time_scale: f64,
+        self_truth_csv: Option<&std::path::Path>,
+        mlat_adsb: bool,
+    ) -> anyhow::Result<Self> {
+        let (publish, _) = tokio::sync::broadcast::channel(1024);
         Ok(State {
+            publish,
+            adsb_pos: HashMap::new(),
+            self_truth_csv: match self_truth_csv {
+                Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+                None => None,
+            },
+            mlat_adsb,
             rx_bias: Vec::new(),
             receivers: Vec::new(),
             reference: None,
@@ -174,6 +206,25 @@ impl State {
         if let Some(alt) = de.alt_ft {
             self.alts_ft.insert(de.icao, alt);
         }
+        // Self-truth reference: what the aircraft itself claims.
+        let stamp = self.scaled_now();
+        self.adsb_pos.insert(
+            de.icao,
+            (
+                Geodetic {
+                    lat_deg: pe.0,
+                    lon_deg: pe.1,
+                    alt_m,
+                },
+                stamp,
+            ),
+        );
+        if self.mlat_adsb {
+            // Feed the even DF17 into the mlat grouping path as well: its
+            // per-receiver timestamps make ADS-B aircraft multilateratable,
+            // and their broadcast position scores the solve (selftruth.csv).
+            self.on_mlat(rx, et, em_hex);
+        }
 
         let sp = self
             .syncpoints
@@ -207,6 +258,15 @@ impl State {
     pub fn on_mlat(&mut self, rx: usize, t_counts: f64, m_hex: &str) {
         let Ok(m) = hex::decode(m_hex) else { return };
         let icao = match mb_modes::decode::df_of(&m) {
+            Some(17) => {
+                if !self.mlat_adsb {
+                    return;
+                }
+                match mb_modes::decode::parse_df17_airborne(&m) {
+                    Some(d) => d.icao,
+                    None => return,
+                }
+            }
             Some(4) => {
                 let Some((icao, alt)) = mb_modes::decode::parse_df4(&m) else {
                     return;
@@ -230,6 +290,7 @@ impl State {
             .or_insert_with(|| Group {
                 created: Instant::now(),
                 icao,
+                df17: m.first().map(|b| b >> 3) == Some(17),
                 entries: Vec::new(),
             });
         g.entries.push((rx, t_s, at_scaled));
@@ -307,12 +368,17 @@ impl State {
             while j < conv.len() && conv[j].1 - start_t <= CLUSTER_SPAN_S {
                 j += 1;
             }
-            self.solve_cluster(g.icao, &conv[i..j]);
+            self.solve_cluster(g.icao, g.df17, &conv[i..j]);
             i = j;
         }
     }
 
-    fn solve_cluster(&mut self, icao: Icao, cluster: &[(usize, f64, f64, f64)]) {
+    fn solve_cluster(
+        &mut self,
+        icao: Icao,
+        cluster_is_df17: bool,
+        cluster: &[(usize, f64, f64, f64)],
+    ) {
         // One observation per receiver: earliest (direct path; any duplicate
         // within a cluster would be multipath in the real world).
         let mut seen = std::collections::HashSet::new();
@@ -393,6 +459,7 @@ impl State {
                 }
             }
         };
+        let is_df17_group = cluster_is_df17;
         match solve::solve_robust(&obs, alt_m, init) {
             Some(sol) => {
                 // Covariance error ceiling + accuracy-scaled output rate:
@@ -406,6 +473,44 @@ impl State {
                     && elapsed / 20.0 < sol.err_est_m / Self::THROTTLE_SCALE_M
                 {
                     self.stats_rejected += 1;
+                    return;
+                }
+                // DF17 (self-truth) fixes: score against the aircraft's own
+                // broadcast position, keep them OUT of results.csv/SBS so the
+                // bench comparison stays apples-to-apples, but DO learn
+                // receiver biases from them — ADS-B traffic is abundant.
+                if is_df17_group {
+                    if sol.residuals_s.len() == rx_ids.len()
+                        && rx_ids.len() >= 5
+                        && sol.err_est_m < 500.0
+                    {
+                        for (i, &rxi) in rx_ids.iter().enumerate() {
+                            let b = &mut self.rx_bias[rxi];
+                            let k = if b.n < 50 { 0.10 } else { 0.02 };
+                            let r = sol.residuals_s[i];
+                            b.bias_s += k * r;
+                            b.n += 1;
+                        }
+                    }
+                    if let Some((claimed, at)) = self.adsb_pos.get(&icao).copied() {
+                        if (now_scaled - at).abs() < 5.0 {
+                            let err = sol.pos.haversine_m(&claimed);
+                            if let Some(w) = self.self_truth_csv.as_mut() {
+                                let _ = w.write_all(
+                                    format!(
+                                        "{:.3},{},{:.1},{:.1},{}\n",
+                                        stamp,
+                                        icao.to_hex(),
+                                        err,
+                                        sol.err_est_m,
+                                        obs.len()
+                                    )
+                                    .as_bytes(),
+                                );
+                                let _ = w.flush();
+                            }
+                        }
+                    }
                     return;
                 }
                 self.stats_solved += 1;
@@ -446,12 +551,108 @@ impl State {
                 );
                 let _ = self.csv.write_all(row.as_bytes());
                 let _ = self.csv.flush();
+                // Fan out: SBS (readsb ingest) and result messages
+                // (mlat-client "old" format — field-for-field the oracle's
+                // report_mlat_position_old).
+                let (d, tm) = sbs_datetime(stamp);
+                let sbs_line = format!(
+                    "MSG,3,1,1,{},1,{d},{tm},{d},{tm},,{alt_ft},,,{:.5},{:.5},,,,,,0\r\n",
+                    icao.to_hex().to_uppercase(),
+                    sol.pos.lat_deg,
+                    sol.pos.lon_deg,
+                );
+                let result_line = format!(
+                    "{{\"result\":{{\"@\":{stamp:.3},\"addr\":\"{}\",\"lat\":{:.5},\"lon\":{:.5},\"alt\":{alt_ft},\"callsign\":null,\"squawk\":null,\"hdop\":0.0,\"vdop\":0.0,\"tdop\":0.0,\"gdop\":0.0,\"nstations\":{}}}}}\n",
+                    icao.to_hex(),
+                    sol.pos.lat_deg,
+                    sol.pos.lon_deg,
+                    obs.len()
+                );
+                let _ = self.publish.send(std::sync::Arc::new(Published {
+                    sbs_line,
+                    result_line,
+                }));
             }
             None => {
                 self.stats_rejected += 1;
             }
         }
     }
+}
+
+impl State {
+    /// Oracle-shaped sync.json so existing monitoring (sync-map & friends)
+    /// works unchanged: {user: {peers: {peer: [count, .., ppm, ..]}}}.
+    pub fn sync_json(&self) -> serde_json::Value {
+        let mut top = serde_json::Map::new();
+        for (i, r) in self.receivers.iter().enumerate() {
+            let mut peers = serde_json::Map::new();
+            for ((a, b), pm) in &self.pairs {
+                if *a == i {
+                    let (n, ppm) = pm.status();
+                    peers.insert(
+                        self.receivers[*b].user.clone(),
+                        serde_json::json!([n, 0.1, ppm, 0, 0, 0.0, 0, 0]),
+                    );
+                }
+            }
+            top.insert(
+                r.user.clone(),
+                serde_json::json!({ "peers": serde_json::Value::Object(peers) }),
+            );
+        }
+        serde_json::Value::Object(top)
+    }
+}
+
+/// SBS wants local-ish date/time strings; emit UTC from the unix stamp.
+fn sbs_datetime(unix: f64) -> (String, String) {
+    let secs = unix as i64;
+    let days = secs / 86400;
+    let (mut y, mut rem) = (1970i64, days);
+    loop {
+        let len = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if rem < len {
+            break;
+        }
+        rem -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let ml = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    while rem >= ml[m] {
+        rem -= ml[m];
+        m += 1;
+    }
+    let tod = secs.rem_euclid(86400);
+    let frac = ((unix - secs as f64) * 1000.0) as i64;
+    (
+        format!("{y:04}/{:02}/{:02}", m + 1, rem + 1),
+        format!(
+            "{:02}:{:02}:{:02}.{frac:03}",
+            tod / 3600,
+            (tod / 60) % 60,
+            tod % 60
+        ),
+    )
 }
 
 fn dist(a: &Ecef, b: &Ecef) -> f64 {
