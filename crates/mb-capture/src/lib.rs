@@ -198,6 +198,18 @@ impl CaptureReader {
         Ok(out)
     }
 
+    /// Audibility rows as raw JSON values — the schema belongs to mb-sim;
+    /// consumers pick the fields they need.
+    pub fn audibility_raw(&self) -> Result<Vec<serde_json::Value>, CaptureError> {
+        let f = std::fs::File::open(self.dir.join("audibility.jsonl.zst"))?;
+        let z = BufReader::new(zstd::Decoder::new(f)?);
+        let mut out = Vec::new();
+        for line in z.lines() {
+            out.push(serde_json::from_str(&line?)?);
+        }
+        Ok(out)
+    }
+
     pub fn client_records(&self, entry: &ClientEntry) -> Result<RecordIter, CaptureError> {
         let f = std::fs::File::open(self.dir.join(&entry.file))?;
         let mut z = BufReader::new(zstd::Decoder::new(f)?);

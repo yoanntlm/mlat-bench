@@ -4,6 +4,7 @@ mod doctor;
 mod gencmd;
 mod probe;
 mod runcmd;
+mod scorecmd;
 
 use clap::{Parser, Subcommand};
 
@@ -59,8 +60,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Inspect { capture } => gencmd::inspect(&capture),
         Cmd::Run { scenario } => runcmd::run(&scenario).await,
         Cmd::Replay { capture } => runcmd::replay(&capture).await,
-        Cmd::Score { .. } => {
-            anyhow::bail!("not implemented yet — see plan milestone M4")
-        }
+        Cmd::Score { run_dir } => scorecmd::score(&run_dir),
     }
 }

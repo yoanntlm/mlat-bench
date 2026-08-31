@@ -102,6 +102,12 @@ async fn replay_capture(capture: &Path, run_dir: &Path) -> Result<()> {
         }))?,
     )?;
     println!("run: artifacts in {}", run_dir.display());
+    if result.is_ok() {
+        // One command → report: score immediately while the artifacts are hot.
+        if let Err(e) = crate::scorecmd::score(run_dir) {
+            println!("run: scoring failed (artifacts intact): {e:#}");
+        }
+    }
     result
 }
 
