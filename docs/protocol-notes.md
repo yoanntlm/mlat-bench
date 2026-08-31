@@ -128,6 +128,22 @@ mirroring the existing "result is suspect" path); reproduction: any
 LocaRDS import replayed at this density. Fairness note: numbers
 from unpatched-oracle runs at scale measure this bug, not throughput.
 
+## Downlink compression is asymmetric per mode (2026-09-01, from source)
+
+`jsonclient.py:203` maps each compression mode to a read method AND a write
+method: `zlib2` uses `write_zlib` (server→client is framed and compressed,
+same 2-byte-length + stripped-sync-flush format, batched ~1 s, flushed
+before 32 KiB of output), while `zlib` and `none` use `write_raw` (plain
+NDJSON lines). The handshake reply itself is always a plain line.
+Found by mlatc: its line-based reader hit binary bytes ~3 s after a zlib2
+handshake (the server's first start_sending batch).
+
+Consequence for mlatd: it currently writes a plain-line downlink on every
+connection. That is correct for `none` and `zlib` and wrong for `zlib2`;
+today it is masked because mlatd's negotiation prefers `none` and
+mlat-client always offers it. For parity (and feeder bandwidth) mlatd
+should prefer zlib2 like the oracle and compress its downlink. Open item.
+
 ## Open questions
 
 - [ ] `ssync` split-sync: when does the client prefer it, does the oracle need

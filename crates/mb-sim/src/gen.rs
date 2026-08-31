@@ -292,6 +292,8 @@ fn build_client(
         return_results: Some(false),
         return_result_format: None,
         client_version: Some(format!("mlat-bench {}", env!("CARGO_PKG_VERSION"))),
+        selective_traffic: None,
+        heartbeat: None,
     };
 
     let mut clock = ClockModel::new(&rx.clock);

@@ -1,0 +1,25 @@
+[package]
+name = "mlatc"
+description = "MLAT client: Beast input to an mlat-server-protocol server; a compatible replacement for mlat-client"
+version.workspace = true
+edition.workspace = true
+# Copyleft, like the mlat-client it replaces; same license as mlatd so the
+# repo carries two licenses total.
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+
+[[bin]]
+name = "mlatc"
+path = "src/main.rs"
+
+[dependencies]
+mb-modes.workspace = true
+mb-proto.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+mb-core.workspace = true

@@ -137,6 +137,32 @@ residual-variance weighting) so that they are not retried. The k² growth of
 sync traffic at scale is the reason for the oracle's MAX_SYNC_AC = 15:
 congestion control, not statistics.
 
+## The client
+
+`crates/mlatc` is a Rust MLAT client developed against the same harness: a
+compatible replacement for mutability's mlat-client. Beast input, the
+mlat-client wire protocol out (zlib2 both directions, selective traffic,
+sync pairing, clock_reset, rate reports), and an SBS listener for returned
+positions. mlat-client's flag names.
+
+Verified two ways on the smoke capture, five instances fed by
+`beast-serve`:
+
+- Against mlatd: 1,750 positions at p50 20 m / p90 44 m / p99 106 m, zero
+  gross ghosts. The real mlat-client on the same pipeline scored
+  p50 31 / p90 77 / p99 144 m.
+- Against the real mlat-server (the oracle container), 10 minutes real
+  time: no disconnects, clock sync trains (coordinator: 0 bad sync, 0 %
+  outliers), 879 positions at p50 104 m returned to the client's SBS
+  output. No same-pipeline real-mlat-client baseline exists yet for this
+  number; the oracle steers real clients' sync traffic, so it is not
+  comparable to the replay rows above. This run also found an undocumented
+  protocol fact: zlib2 compresses the server-to-client direction too
+  (docs/protocol-notes.md).
+
+Not implemented yet: radarcape_gps and SBS inputs, UDP transport, Beast
+result outputs.
+
 ## One binary, world scale
 
 The earlier single-mutex candidate collapsed at approximately 800 dense
@@ -254,5 +280,6 @@ wiedehopf maintains the fork in production use.
 - Reduce the real-data p99 (~1 km) and the 0.15 % ghost floor.
 - Measure a 10k-receiver world instead of extrapolating to it.
 - UDP transport and the remaining mlat-server surface (tracked in the
-  mlatd repo).
+  mlatd repo); mlatd zlib2 downlink compression for parity.
+- The remaining mlatc surface: radarcape_gps input, Beast result outputs.
 - Coordinate fuzzing for shareable real recordings.

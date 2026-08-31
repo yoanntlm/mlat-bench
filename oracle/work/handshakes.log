@@ -1,2 +1,32 @@
 {"version":3,"user":"mb-probe-000","compress":["none"],"lat":47.2181,"lon":-1.5528,"alt":40.0,"clock_type":"dump1090","return_results":true,"client_version":"mlat-bench 0.1.0"}
 
+{"version":3,"user":"rx-000","compress":["zlib2","none"],"lat":47.2181,"lon":-1.5528,"alt":40.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-001","compress":["zlib2","none"],"lat":47.4802,"lon":-1.0511,"alt":85.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-002","compress":["zlib2","none"],"lat":46.9433,"lon":-1.1002,"alt":60.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-003","compress":["zlib2","none"],"lat":47.0821,"lon":-2.0107,"alt":25.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-004","compress":["zlib2","none"],"lat":47.5934,"lon":-1.7523,"alt":110.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-002","compress":["zlib2","none"],"lat":46.9433,"lon":-1.1002,"alt":60.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-003","compress":["zlib2","none"],"lat":47.0821,"lon":-2.0107,"alt":25.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-004","compress":["zlib2","none"],"lat":47.5934,"lon":-1.7523,"alt":110.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-000","compress":["zlib2","none"],"lat":47.2181,"lon":-1.5528,"alt":40.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-001","compress":["zlib2","none"],"lat":47.4802,"lon":-1.0511,"alt":85.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-000","compress":["zlib2","none"],"lat":47.2181,"lon":-1.5528,"alt":40.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-001","compress":["zlib2","none"],"lat":47.4802,"lon":-1.0511,"alt":85.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-002","compress":["zlib2","none"],"lat":46.9433,"lon":-1.1002,"alt":60.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-003","compress":["zlib2","none"],"lat":47.0821,"lon":-2.0107,"alt":25.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
+{"version":3,"user":"rx-004","compress":["zlib2","none"],"lat":47.5934,"lon":-1.7523,"alt":110.0,"clock_type":"dump1090","return_results":true,"client_version":"mlatc 0.1.0","selective_traffic":true,"heartbeat":true}
+
