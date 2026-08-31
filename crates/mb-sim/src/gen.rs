@@ -284,7 +284,12 @@ fn build_client(
             ClockSpec::Dump1090 { .. } => ClockType::Dump1090,
             ClockSpec::RadarcapeGps { .. } => ClockType::RadarcapeGps,
         },
-        return_results: Some(true),
+        // Results off: with hundreds of clients, echoing every fix to every
+        // client is ~N×results lines of traffic the REPLAY process must
+        // read — at 4× it drowned the bench's own heartbeat anchoring
+        // (uniform 10.3 s scoring skew; server was fine). Result delivery is
+        // verified by dedicated runs, not every capture.
+        return_results: Some(false),
         return_result_format: None,
         client_version: Some(format!("mlat-bench {}", env!("CARGO_PKG_VERSION"))),
     };

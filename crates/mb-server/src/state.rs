@@ -113,7 +113,12 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(time_scale: f64, mlat_adsb: bool, emit_filtered: bool) -> Self {
+    pub fn new(
+        time_scale: f64,
+        mlat_adsb: bool,
+        emit_filtered: bool,
+        epoch: (f64, Instant),
+    ) -> Self {
         State {
             out: None,
             adsb_pos: HashMap::new(),
@@ -129,11 +134,11 @@ impl State {
             alts_ft: HashMap::new(),
             tracks: HashMap::new(),
             filters: HashMap::new(),
-            t0_real: Instant::now(),
-            t0_unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0),
+            // ONE scaled-clock epoch for the whole process (main creates it):
+            // per-shard epochs diverge by (k−1)·startup-gap at speed k — the
+            // sharded ladder measured that as a flat 3 km error at 4×.
+            t0_unix: epoch.0,
+            t0_real: epoch.1,
             time_scale,
             stats_solved: 0,
             stats_rejected: 0,
@@ -178,7 +183,15 @@ impl State {
 
     /// A sync message from receiver `rx`: the same DF17 even/odd pair seen by
     /// several receivers is the shared event that trains pair clocks.
-    pub fn on_sync(&mut self, rx: usize, et: f64, ot: f64, em_hex: &str, om_hex: &str) {
+    pub fn on_sync(
+        &mut self,
+        rx: usize,
+        et: f64,
+        ot: f64,
+        em_hex: &str,
+        om_hex: &str,
+        at_scaled: f64,
+    ) {
         let (Ok(em), Ok(om)) = (hex::decode(em_hex), hex::decode(om_hex)) else {
             return;
         };
@@ -224,7 +237,7 @@ impl State {
             self.alts_ft.insert(de.icao, alt);
         }
         // Self-truth reference: what the aircraft itself claims.
-        let stamp = self.scaled_now();
+        let stamp = at_scaled;
         self.adsb_pos.insert(
             de.icao,
             (
@@ -240,7 +253,7 @@ impl State {
             // Feed the even DF17 into the mlat grouping path as well: its
             // per-receiver timestamps make ADS-B aircraft multilateratable,
             // and their broadcast position scores the solve (selftruth.csv).
-            self.on_mlat(rx, et, em_hex);
+            self.on_mlat(rx, et, em_hex, at_scaled);
         }
 
         let sp = self
@@ -272,7 +285,7 @@ impl State {
     }
 
     /// An mlat message: group identical frames across receivers.
-    pub fn on_mlat(&mut self, rx: usize, t_counts: f64, m_hex: &str) {
+    pub fn on_mlat(&mut self, rx: usize, t_counts: f64, m_hex: &str, at_scaled: f64) {
         let Ok(m) = hex::decode(m_hex) else { return };
         let icao = match mb_modes::decode::df_of(&m) {
             Some(17) => {
@@ -300,7 +313,6 @@ impl State {
             _ => return,
         };
         let t_s = t_counts / self.receivers[rx].freq_hz;
-        let at_scaled = self.scaled_now();
         let g = self
             .groups
             .entry(m_hex.to_string())
@@ -481,6 +493,17 @@ impl State {
         };
         self.stamp_offset.insert(local_ref, off);
         let stamp = t_ref_min + off;
+        if std::env::var("MB_DEBUG_STAMP").is_ok() && self.stats_solved < 5 {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            eprintln!(
+                "STAMP dbg: t_ref_min={t_ref_min:.3} off={off:.3} stamp={stamp:.3} scaled_now={:.3} wall={wall:.3} arrival_at_scaled={:.3}",
+                self.scaled_now(),
+                cluster.first().map(|c| c.3).unwrap_or(0.0)
+            );
+        }
         // Cap the solve size (oracle: MAX_GROUP=15): beyond ~16 receivers the
         // extra observations buy almost no geometry but cost quadratic solve
         // time. Keep the most precise ones.

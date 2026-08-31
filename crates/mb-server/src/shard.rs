@@ -32,11 +32,16 @@ pub enum ShardMsg {
         ot: f64,
         em: String,
         om: String,
+        /// Output-clock time at CONNECTION READ — before shard queueing.
+        /// Stamping at shard-processing time lagged by the queue depth under
+        /// load (bench: flat 2.2 km at 4×, heartbeats bypass queues).
+        at_scaled: f64,
     },
     Mlat {
         rx: usize,
         t: f64,
         m: String,
+        at_scaled: f64,
     },
     ClockReset {
         rx: usize,
@@ -120,8 +125,10 @@ pub async fn run_shard(
                         let id = state.add_receiver(info);
                         let _ = reply.send(id);
                     }
-                    ShardMsg::Sync { rx, et, ot, em, om } => state.on_sync(rx, et, ot, &em, &om),
-                    ShardMsg::Mlat { rx, t, m } => state.on_mlat(rx, t, &m),
+                    ShardMsg::Sync { rx, et, ot, em, om, at_scaled } => {
+                        state.on_sync(rx, et, ot, &em, &om, at_scaled)
+                    }
+                    ShardMsg::Mlat { rx, t, m, at_scaled } => state.on_mlat(rx, t, &m, at_scaled),
                     ShardMsg::ClockReset { rx } => state.clock_reset(rx),
                     ShardMsg::Stats(reply) => {
                         let _ = reply.send((

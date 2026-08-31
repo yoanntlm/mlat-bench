@@ -421,10 +421,19 @@ async fn feed_client(
                 Ok(ServerMsg::Heartbeat {
                     server_time: Some(st),
                 }) => {
-                    // First heartbeat anchors the oracle's (possibly faked)
-                    // clock to ours for accelerated-run scoring.
+                    // Anchor with the LEAST read-side lag: our read delay
+                    // enters scoring multiplied by the speed factor (audit:
+                    // first-heartbeat anchoring during an 800-connection
+                    // startup storm skewed a 4x world run by a uniform
+                    // 10.3 s — the server was fine, the measuring stick
+                    // wasn't). Maximizing st − speed·now picks the beat we
+                    // read closest to its send instant.
                     let mut a = hb_anchor.lock().unwrap();
-                    if a.is_none() {
+                    let better = match *a {
+                        None => true,
+                        Some((pa, ph)) => st - speed * now > ph - speed * pa,
+                    };
+                    if better {
                         *a = Some((now, st));
                     }
                 }

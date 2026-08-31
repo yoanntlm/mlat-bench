@@ -96,6 +96,13 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_else(|| cli.listen.clone());
 
+    // ONE scaled-clock epoch for everything: shards, heartbeats, stamps.
+    let epoch_real = std::time::Instant::now();
+    let epoch_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
     // ---- output task: owns every writer, dedupes boundary aircraft -------
     let (out_tx, mut out_rx) = mpsc::channel::<OutMsg>(4096);
     let (publish, _) = tokio::sync::broadcast::channel::<Arc<Published>>(1024);
@@ -154,7 +161,12 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
     for _ in 0..n_shards {
         let (tx, rx) = mpsc::channel::<ShardMsg>(8192);
-        let state = State::new(cli.time_scale, mlat_adsb, cli.write_filtered_csv.is_some());
+        let state = State::new(
+            cli.time_scale,
+            mlat_adsb,
+            cli.write_filtered_csv.is_some(),
+            (epoch_unix, epoch_real),
+        );
         tokio::spawn(shard::run_shard(state, rx, out_tx.clone(), window));
         handles.push(Arc::new(ShardHandle {
             tx,
@@ -248,7 +260,16 @@ async fn main() -> Result<()> {
         let publish = publish.clone();
         let scale = cli.time_scale;
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, router, publish, hb_real, scale).await {
+            if let Err(e) = handle_client(
+                stream,
+                router,
+                publish,
+                hb_real,
+                scale,
+                (epoch_unix, epoch_real),
+            )
+            .await
+            {
                 eprintln!("mb-server: {peer}: {e:#}");
             }
         });
@@ -266,12 +287,9 @@ async fn handle_client(
     publish: tokio::sync::broadcast::Sender<Arc<Published>>,
     hb_real: Duration,
     time_scale: f64,
+    epoch: (f64, std::time::Instant),
 ) -> Result<()> {
-    let conn_t0 = std::time::Instant::now();
-    let conn_t0_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    let (conn_t0_unix, conn_t0) = epoch;
     stream.set_nodelay(true)?;
     let (rd, mut wr) = stream.into_split();
     let mut rd = BufReader::new(rd);
@@ -401,7 +419,8 @@ async fn handle_client(
                     }
                     r = rd.read_until(b'\n', &mut line) => {
                         if r? == 0 { break }
-                        process_line_tx(&shard, rx, &line, Some(&tx_line), &mut requested).await;
+                        let now_s = scaled_now(conn_t0_unix, conn_t0, time_scale);
+                        process_line_tx(&shard, rx, &line, Some(&tx_line), &mut requested, now_s).await;
                     }
                 }
             }
@@ -429,9 +448,11 @@ async fn handle_client(
                 let Ok(chunk) = dec.decode_frame(&payload) else {
                     anyhow::bail!("zlib frame decode failed for {user}");
                 };
+                let now_s = scaled_now(conn_t0_unix, conn_t0, time_scale);
                 for line in chunk.split(|b| *b == b'\n') {
                     if !line.is_empty() {
-                        process_line_tx(&shard, rx, line, Some(&tx_line), &mut requested).await;
+                        process_line_tx(&shard, rx, line, Some(&tx_line), &mut requested, now_s)
+                            .await;
                     }
                 }
             }
@@ -451,6 +472,7 @@ async fn process_line_tx(
     line: &[u8],
     tx: Option<&tokio::sync::mpsc::Sender<String>>,
     requested: &mut std::collections::HashSet<String>,
+    at_scaled: f64,
 ) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
@@ -500,6 +522,7 @@ async fn process_line_tx(
                 ot,
                 em: em.to_string(),
                 om: om.to_string(),
+                at_scaled,
             })
             .await;
     } else if let Some(ml) = v.get("mlat") {
@@ -512,6 +535,7 @@ async fn process_line_tx(
                 rx,
                 t,
                 m: m.to_string(),
+                at_scaled,
             })
             .await;
     } else if v.get("clock_reset").is_some() || v.get("clock_jump").is_some() {
