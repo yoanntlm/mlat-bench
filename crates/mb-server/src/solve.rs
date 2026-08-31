@@ -26,6 +26,11 @@ pub struct Solution {
     /// Kept for logging/tests; not part of the CSV contract.
     #[allow(dead_code)]
     pub iterations: u32,
+    /// Solved transmit time in the common timebase.
+    pub t_tx: f64,
+    /// Per-observation UNWEIGHTED residuals (predicted − measured, seconds),
+    /// same order as the input slice — food for per-receiver bias learning.
+    pub residuals_s: Vec<f64>,
 }
 
 const MAX_ITER: u32 = 15;
@@ -42,6 +47,10 @@ pub const MAX_RMS_S: f64 = 3e-6;
 /// one receiver's sync noise poisoning the solve).
 pub fn solve_robust(obs: &[Observation], alt_m: f64, init: Geodetic) -> Option<Solution> {
     let full = solve(obs, alt_m, init);
+    // LOO only when the full set actually failed or fit badly. The bench
+    // rejected unconditional LOO decisively (lab p90 38→73 m): an n−1
+    // subset fits 3 params to 4 points, so its rms is STRUCTURALLY tiny and
+    // any rms-based preference systematically picks worse geometry.
     let trigger = match &full {
         Some(s) => s.rms_s > 0.5e-6,
         None => true,
@@ -133,6 +142,7 @@ pub fn solve(obs: &[Observation], alt_m: f64, init: Geodetic) -> Option<Solution
     // with σ² from the weighted residuals. Lat/lon variances → meters.
     // If the matrix won't invert, the fix is suspect — the oracle drops
     // those outright (mlattrack.py "this result is suspect"), so do we.
+    let final_resid = residuals(obs, lat, lon, alt_m, t_tx);
     let r = residuals_w(obs, lat, lon, alt_m, t_tx);
     let dof = (obs.len() as f64 - 3.0).max(1.0);
     let sigma2 = r.iter().map(|x| x * x).sum::<f64>() / dof;
@@ -153,6 +163,8 @@ pub fn solve(obs: &[Observation], alt_m: f64, init: Geodetic) -> Option<Solution
         rms_s: rms,
         err_est_m,
         iterations: iters,
+        t_tx,
+        residuals_s: final_resid,
     })
 }
 

@@ -45,7 +45,22 @@ struct Group {
     entries: Vec<(usize, f64, f64)>,
 }
 
+/// Learned per-receiver systematic timing bias — OUR addition, not an oracle
+/// port. Wrong reported coordinates, cable/processing delay, altitude error:
+/// they all present as a stable signed solve residual for that receiver, so
+/// learn it (slow EMA from well-observed solves) and subtract it.
+#[derive(Clone, Copy, Default)]
+struct RxBias {
+    bias_s: f64,
+    /// EMA of squared residual deviation AFTER bias removal — the receiver's
+    /// non-correctable scatter (e.g. the bearing-dependent part of a wrong
+    /// reported position). Feeds the observation weight honestly.
+    var_s2: f64,
+    n: u32,
+}
+
 pub struct State {
+    rx_bias: Vec<RxBias>,
     pub receivers: Vec<ReceiverInfo>,
     reference: Option<usize>,
     pairs: HashMap<(usize, usize), PairModel>,
@@ -67,6 +82,7 @@ pub struct State {
 impl State {
     pub fn new(csv_path: &std::path::Path, time_scale: f64) -> anyhow::Result<Self> {
         Ok(State {
+            rx_bias: Vec::new(),
             receivers: Vec::new(),
             reference: None,
             pairs: HashMap::new(),
@@ -93,6 +109,7 @@ impl State {
     }
 
     pub fn add_receiver(&mut self, info: ReceiverInfo) -> usize {
+        self.rx_bias.push(RxBias::default());
         let gps = info.gps;
         self.receivers.push(info);
         let idx = self.receivers.len() - 1;
@@ -295,17 +312,28 @@ impl State {
         let mut seen = std::collections::HashSet::new();
         let mut obs = Vec::new();
         let mut users = Vec::new();
+        let mut rx_ids = Vec::new();
         let mut stamp = f64::INFINITY;
         for &(rx, t, sigma, at_scaled) in cluster {
             if !seen.insert(rx) {
                 continue;
             }
+            // Apply the learned systematic bias: residual = predicted −
+            // measured, so a positive stable residual means this receiver's
+            // effective range is modeled too long — advance its clock reading.
+            let b = self.rx_bias[rx];
             obs.push(Observation {
                 rx: self.receivers[rx].ecef,
-                t_s: t,
+                t_s: t + b.bias_s,
+                // NOTE: folding the learned residual variance into this
+                // weight was tried and benched WORSE on the hostile world
+                // (109/336/910 vs 105/293/852 m) — the pair-model sigma
+                // already carries the receiver's scatter; double-counting it
+                // over-flattens the weights. Scalar bias only.
                 err_s: sigma,
             });
             users.push(self.receivers[rx].user.clone());
+            rx_ids.push(rx);
             stamp = stamp.min(at_scaled);
         }
         if obs.len() < 4 {
@@ -363,6 +391,24 @@ impl State {
                     return;
                 }
                 self.stats_solved += 1;
+                // Learn per-receiver bias only from well-observed, full-set
+                // solves (residual order matches rx_ids) with a slow EMA —
+                // it must absorb the receiver's systematic error, not the
+                // geometry of any single fix.
+                if sol.residuals_s.len() == rx_ids.len()
+                    && rx_ids.len() >= 5
+                    && sol.err_est_m < 500.0
+                {
+                    for (i, &rx) in rx_ids.iter().enumerate() {
+                        let b = &mut self.rx_bias[rx];
+                        let k = if b.n < 50 { 0.10 } else { 0.02 };
+                        let r = sol.residuals_s[i];
+                        b.bias_s += k * r;
+                        let dev = r - b.bias_s;
+                        b.var_s2 += k * (dev * dev - b.var_s2);
+                        b.n += 1;
+                    }
+                }
                 let t = self.tracks.get_mut(&icao).expect("entry above");
                 t.last_pos = Some(sol.pos);
                 t.last_time_scaled = now_scaled;
