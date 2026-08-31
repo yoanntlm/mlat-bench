@@ -173,15 +173,27 @@ LocaRDS slice, both servers, identical input, 2× replay:
 | coverage of trackable seconds | ~0 % | **25 %** |
 | CPU / RSS | 40 % / 776 MB | **14 % / 55 MB** |
 
-IMPORTANT CORRECTION (2026-09-01): the oracle's 28-result collapse turned
-out to be a reproducible upstream BUG the bench uncovered, not throughput —
-a NaN covariance raises ValueError inside mlattrack's group-processing list
-comprehension, dropping every pending group in the cycle (18 crash-loops
-observed; see docs/protocol-notes.md). With a one-line guard patched into
-the oracle image, the fair comparison is being re-measured; the honest
-standing efficiency claims are the resource gap measured while both ran
-healthy (~3x CPU, ~14x RSS) and the synthetic metro coverage gap (47% vs
-4-6%, no crash involved). Never quote the 1,600x — it measured a bug. Getting here took two real-data lessons in one
+Correction history, kept on purpose (2026-09-01): the oracle's original
+28-result collapse was a reproducible upstream BUG this bench uncovered —
+a NaN covariance raises ValueError inside mlattrack's group-processing
+list comprehension, dropping every pending group in the cycle (18
+crash-loops; docs/protocol-notes.md, one-line guard now patched into the
+oracle image, issue drafted upstream). With the guard in place, the FAIR
+real-data comparison on the identical capture:
+
+| patched oracle vs mb-server | oracle | mb-server |
+|---|---|---|
+| positions | 7,381 | **35,769** |
+| p50 / p90 / p99 | 135 / 504 / 2,069 m | **94 / 298 / 901 m** |
+| ghost rate | 11.6 % | **0.18 %** |
+| coverage | 4.6 % | **25.1 %** |
+| CPU / RSS | 54 % / 775 MB | **~14 % / 55 MB** |
+
+Roughly: 5× the output at ~30 % better accuracy per percentile, a ~65×
+lower junk rate, on a quarter of the CPU. Also bench-rejected here for
+honesty: alpha-beta track smoothing (`--write-filtered-csv`) LOSES on real
+data (p99 901 → 3,757 m — lag beats smoothing at these update rates);
+the flag stays as an explicitly experimental, currently-losing option. Getting here took two real-data lessons in one
 afternoon: a single global sync reference dies on continental geometry
 (2.17 M sync observations, zero solves — fixed by electing the reference
 PER MESSAGE GROUP, since co-hearing receivers are geographic neighbors),
