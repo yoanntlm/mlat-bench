@@ -26,7 +26,12 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::time::{sleep, sleep_until, Duration, Instant};
 
-const ORACLE_ADDR: &str = "127.0.0.1:40147";
+/// Overridable so a replay can be pointed through the `record` proxy
+/// (MLAT_BENCH_ORACLE_ADDR=127.0.0.1:40150) — how the record/replay
+/// idempotence check works.
+fn oracle_addr() -> String {
+    std::env::var("MLAT_BENCH_ORACLE_ADDR").unwrap_or_else(|_| "127.0.0.1:40147".into())
+}
 const SBS_ADDR: &str = "127.0.0.1:40148";
 /// Kalman-filtered results can trail the last input by several seconds.
 const DRAIN_S: u64 = 30;
@@ -203,7 +208,7 @@ async fn feed_client(
         bail!("first record must be connect, got type {}", first.kind);
     }
 
-    let stream = TcpStream::connect(ORACLE_ADDR)
+    let stream = TcpStream::connect(oracle_addr())
         .await
         .context("connect oracle")?;
     stream.set_nodelay(true)?;

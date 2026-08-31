@@ -3,6 +3,7 @@
 mod doctor;
 mod gencmd;
 mod probe;
+mod recordcmd;
 mod runcmd;
 mod scorecmd;
 
@@ -42,6 +43,20 @@ enum Cmd {
     Score { run_dir: std::path::PathBuf },
     /// Summarize a capture (M2).
     Inspect { capture: std::path::PathBuf },
+    /// Transparent proxy tap: record real mlat-client traffic into a capture.
+    Record {
+        /// Listen address for clients, e.g. 0.0.0.0:40150
+        #[arg(long)]
+        listen: String,
+        /// The real server to forward to, e.g. feed.example.net:31090
+        #[arg(long)]
+        upstream: String,
+        #[arg(short, long)]
+        out: std::path::PathBuf,
+        /// Stop after this many seconds.
+        #[arg(long, default_value_t = 3600)]
+        duration_s: u64,
+    },
 }
 
 #[tokio::main]
@@ -61,5 +76,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run { scenario } => runcmd::run(&scenario).await,
         Cmd::Replay { capture } => runcmd::replay(&capture).await,
         Cmd::Score { run_dir } => scorecmd::score(&run_dir),
+        Cmd::Record {
+            listen,
+            upstream,
+            out,
+            duration_s,
+        } => recordcmd::record(&listen, &upstream, &out, duration_s).await,
     }
 }

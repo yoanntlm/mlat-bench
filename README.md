@@ -16,9 +16,38 @@ a pinned upstream commit inside its own container. The same capture can later
 be replayed against any other implementation and the two reports diffed —
 that's the point.
 
-**Status: early. M0 (scaffold, oracle container, live handshake) works.**
-See `docs/` for the protocol conformance notes and the capture format as they
-stabilize.
+## What a run looks like
+
+`scenarios/smoke.toml` — 5 receivers around Nantes (one GPS-disciplined, four
+consumer dump1090 clocks at −7.8…+12.5 ppm), 8 ADS-B aircraft as sync
+sources, 3 Mode-S-only aircraft to multilaterate, 10 minutes:
+
+```
+$ cargo run -p mlat-bench -- run scenarios/smoke.toml
+...
+score: 981 results, 977 matched
+score: horizontal error p50 27 m / p90 67 m / p99 146 m
+score: ghosts 0 unknown + 4 gross
+```
+
+The oracle's sync state converges on the *simulated* clock offsets (its
+pairwise ppm estimates match the scenario's values), the high-rate targets
+acquire in ~2 s, and the low-rate one takes 126 s — the physics behaves.
+Reports also surface things worth knowing: e.g. the oracle's self-reported
+error estimate ran ~9× larger than its true error on this scenario.
+
+## Quickstart
+
+```sh
+docker compose -f oracle/compose.yaml up -d --wait   # build + start the oracle
+cargo run -p mlat-bench -- doctor                    # environment check
+cargo run -p mlat-bench -- run scenarios/smoke.toml  # gen + replay + score
+uv run plots/plot.py runs/<run-dir>                  # error CDF, map, CPU
+```
+
+Other commands: `gen` (scenario → capture), `inspect`, `replay` (existing
+capture), `score` (re-score a run), `record` (transparent proxy tap that
+captures real mlat-client traffic for later replay).
 
 ## What this is not
 
@@ -28,13 +57,22 @@ stabilize.
   measure behavior under *controlled* conditions, which is what regression
   testing needs and field data can't give.
 
-## Quickstart (current state)
+## Determinism
 
-```sh
-docker compose -f oracle/compose.yaml up -d --wait   # build + start the oracle
-cargo run -p mlat-bench -- doctor                    # environment check
-cargo run -p mlat-bench -- probe                     # handshake + heartbeats
-```
+`gen` is a pure function of the scenario file: same TOML → byte-identical
+capture, forever (domain-separated seeded RNG; adding an aircraft never
+perturbs another's byte stream). Replay timing is real-time and OS-jittered,
+but MLAT precision lives in the receiver-clock timestamps *inside* the
+payload, which are fixed at gen time. The oracle itself is not deterministic
+— compare runs via metrics, not bytes.
+
+## Docs
+
+- `docs/protocol-notes.md` — verified wire-protocol facts, with dates
+- `docs/capture-format.md` — the MBC capture container, frozen v1
+- `docs/metrics.md` — exact metric definitions
+- `docs/prior-art.md` — annotated bibliography (datasets, competitions,
+  methods worth benchmarking on this bench)
 
 ## Licensing boundary
 
@@ -42,3 +80,11 @@ The harness is MIT OR Apache-2.0. The oracle server is AGPLv3 and lives only
 in its own container, built from upstream source at image build time; no
 server code is vendored into this repository. Credit where it's due: the MLAT
 protocol and server are the work of Oliver Jowett (mutability) and wiedehopf.
+
+## Roadmap
+
+- Candidate-server slot-in: same capture, two `metrics.json`, one diff.
+- Faster-than-real-time replay (the oracle groups mlat messages by its own
+  wall clock within 0.9 s, so this needs libfaketime in the container).
+- Import of external ground-truth datasets (LocaRDS) as captures.
+- Coordinate fuzzing for shareable real recordings.

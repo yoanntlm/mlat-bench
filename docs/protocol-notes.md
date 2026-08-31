@@ -80,12 +80,27 @@ Our container healthcheck does exactly this every 5 s, so oracle logs contain
 this noise by design. Filter it when reading logs; do not report it as a run
 failure.
 
+## Unsolicited mlat messages are accepted (2026-08-31, observed live)
+
+The bench sends `mlat` for every Mode-S reception without waiting for
+`start_sending` — the oracle processed them and produced positions
+(120 s run: 180 result rows, p50 error 45 m). `start_sending`/`stop_sending`
+is bandwidth steering, not authorization. The replay engine therefore does
+not need to react to selective-traffic commands for correctness.
+
+## sync.json shape (2026-08-31, observed)
+
+Top level: one key per receiver username. Each has `peers`: map of peer
+username → array of at least 8 numbers; field [0] is a sync/pair count and
+field [2] tracks the measured pairwise clock offset in ppm — observed values
+matched the scenario's simulated ppm offsets to within rounding (rx-001
+(+3.2) vs rx-002 (−7.8) reported ≈ −11). Treat everything else as opaque.
+
 ## Open questions
 
 - [ ] `ssync` split-sync: when does the client prefer it, does the oracle need
-      it for anything we measure? (M2/M3)
-- [ ] `rate_report` semantics: does the server *require* rate reports for
-      selective traffic to work, and does their absence change sync behavior?
-      (M3)
-- [ ] Exact `results.csv` write cadence and flush behavior. (M4)
-- [ ] `sync.json` schema in the work dir. (M3 — parse defensively.)
+      it for anything we measure? (M5+)
+- [ ] Does prolonged absence of `rate_report` change server behavior at
+      scale? (not needed for correctness — see above)
+- [ ] Exact `results.csv` flush cadence (rows appeared promptly in the 120 s
+      run; good enough for post-run scoring).
