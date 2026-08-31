@@ -15,6 +15,7 @@
 mod clocksync;
 mod solve;
 mod state;
+mod track;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -52,6 +53,11 @@ struct Cli {
     /// so existing monitoring keeps working.
     #[arg(long)]
     work_dir: Option<std::path::PathBuf>,
+    /// Alpha-beta-smoothed results, same CSV format — the drop-in analogue
+    /// of the oracle's Kalman output. Score raw vs filtered to see if it
+    /// earns its place.
+    #[arg(long)]
+    write_filtered_csv: Option<std::path::PathBuf>,
     /// Multilaterate DF17 (ADS-B) frames too and score each fix against the
     /// aircraft's own broadcast position — real-world accuracy without
     /// external truth. Rows: t,icao,err_m,est_m,n → this CSV.
@@ -68,6 +74,7 @@ async fn main() -> Result<()> {
         cli.time_scale,
         cli.self_truth_csv.as_deref(),
         mlat_adsb,
+        cli.write_filtered_csv.as_deref(),
     )?));
     let listen = cli
         .client_listen

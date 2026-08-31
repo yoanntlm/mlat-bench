@@ -113,6 +113,21 @@ failure (see the 2× fairness run in the same day's bench data before citing
 this). Accelerated comparisons at scale must check the oracle's CPU headroom
 or they measure the Python event loop, not MLAT.
 
+## Upstream bug: NaN covariance crash-loops group processing (2026-09-01)
+
+Found by the bench on a 316-receiver LocaRDS replay: a degenerate solve
+returns `var_est = numpy.trace(ecef_cov) = NaN`; `mlattrack.py:324`
+`error = int(math.sqrt(abs(var_est)))` raises ValueError; the exception
+unwinds through `[group.handle(group) for group in self.groups]`
+(mlattrack.py:58), so EVERY pending group in that processing cycle is
+dropped, not just the degenerate one. Observed as 18 crash-loops that
+collapsed a 10-minute run's output to 28 results while the server was
+otherwise healthy (316 clients synced, 1087 aircraft tracked, 40% CPU).
+Bench-local guard patched into oracle/Dockerfile (skip non-finite var_est,
+mirroring the existing "result is suspect" path); reproduction: any
+LocaRDS import replayed at this density. IMPORTANT for fairness: numbers
+from unpatched-oracle runs at scale measure this bug, not throughput.
+
 ## Open questions
 
 - [ ] `ssync` split-sync: when does the client prefer it, does the oracle need

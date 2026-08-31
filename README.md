@@ -173,9 +173,15 @@ LocaRDS slice, both servers, identical input, 2× replay:
 | coverage of trackable seconds | ~0 % | **25 %** |
 | CPU / RSS | 40 % / 776 MB | **14 % / 55 MB** |
 
-The unpartitioned oracle cannot digest 316 receivers — which is why real
-deployments shard it; that operational cost is what the candidate's
-architecture avoids. Getting here took two real-data lessons in one
+IMPORTANT CORRECTION (2026-09-01): the oracle's 28-result collapse turned
+out to be a reproducible upstream BUG the bench uncovered, not throughput —
+a NaN covariance raises ValueError inside mlattrack's group-processing list
+comprehension, dropping every pending group in the cycle (18 crash-loops
+observed; see docs/protocol-notes.md). With a one-line guard patched into
+the oracle image, the fair comparison is being re-measured; the honest
+standing efficiency claims are the resource gap measured while both ran
+healthy (~3x CPU, ~14x RSS) and the synthetic metro coverage gap (47% vs
+4-6%, no crash involved). Never quote the 1,600x — it measured a bug. Getting here took two real-data lessons in one
 afternoon: a single global sync reference dies on continental geometry
 (2.17 M sync observations, zero solves — fixed by electing the reference
 PER MESSAGE GROUP, since co-hearing receivers are geographic neighbors),

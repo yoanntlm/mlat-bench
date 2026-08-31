@@ -3,6 +3,7 @@
 //! bottleneck, and the simplicity is worth more than a lock hierarchy.
 
 use crate::clocksync::PairModel;
+use crate::track::TrackFilter;
 use crate::solve::{self, Observation};
 use mb_core::{Ecef, Geodetic, Icao, C_MPS};
 use std::collections::HashMap;
@@ -103,7 +104,9 @@ pub struct State {
     groups: HashMap<String, Group>,
     alts_ft: HashMap<Icao, i32>,
     tracks: HashMap<Icao, Track>,
+    filters: HashMap<Icao, TrackFilter>,
     csv: std::io::BufWriter<std::fs::File>,
+    filtered_csv: Option<std::io::BufWriter<std::fs::File>>,
     // Scaled output clock (matches the oracle's faked-clock behavior at
     // accelerated replay; see the harness's scoring anchor).
     t0_real: Instant,
@@ -120,6 +123,7 @@ impl State {
         time_scale: f64,
         self_truth_csv: Option<&std::path::Path>,
         mlat_adsb: bool,
+        filtered_csv: Option<&std::path::Path>,
     ) -> anyhow::Result<Self> {
         let (publish, _) = tokio::sync::broadcast::channel(1024);
         Ok(State {
@@ -139,7 +143,12 @@ impl State {
             groups: HashMap::new(),
             alts_ft: HashMap::new(),
             tracks: HashMap::new(),
+            filters: HashMap::new(),
             csv: std::io::BufWriter::new(std::fs::File::create(csv_path)?),
+            filtered_csv: match filtered_csv {
+                Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+                None => None,
+            },
             t0_real: Instant::now(),
             t0_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
@@ -649,6 +658,34 @@ impl State {
                 );
                 let _ = self.csv.write_all(row.as_bytes());
                 let _ = self.csv.flush();
+                // Smoothed twin: same columns, alpha-beta-filtered position.
+                if self.filtered_csv.is_some() {
+                    let sm = match self.filters.get_mut(&icao) {
+                        Some(f) => f.update(sol.pos, stamp, sol.err_est_m),
+                        None => {
+                            self.filters.insert(icao, TrackFilter::new(sol.pos, stamp));
+                            sol.pos
+                        }
+                    };
+                    let w = self.filtered_csv.as_mut().expect("checked");
+                    let _ = w.write_all(
+                        format!(
+                            "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",
+                            stamp,
+                            icao.to_hex(),
+                            sm.lat_deg,
+                            sm.lon_deg,
+                            alt_ft,
+                            err_m,
+                            obs.len(),
+                            obs.len(),
+                            users.join(","),
+                            obs.len().saturating_sub(4),
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = w.flush();
+                }
                 // Fan out: SBS (readsb ingest) and result messages
                 // (mlat-client "old" format — field-for-field the oracle's
                 // report_mlat_position_old).

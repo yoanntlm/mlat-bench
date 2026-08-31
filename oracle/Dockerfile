@@ -19,6 +19,26 @@ RUN git clone https://github.com/wiedehopf/mlat-server /opt/mlat-server \
     && cd /opt/mlat-server \
     && git checkout ${MLAT_SERVER_COMMIT}
 
+# Bench-local guard for an upstream bug found by this bench (2026-09-01):
+# a degenerate solve yields var_est = NaN, int(sqrt(abs(NaN))) raises
+# ValueError inside the group-processing list comprehension, and EVERY
+# pending group in that cycle is dropped — observed as an 18-crash loop
+# that collapsed output to 28 results on a 316-receiver replay. The guard
+# mirrors the existing "this result is suspect" continue path. Reported
+# upstream; remove when fixed there.
+RUN cd /opt/mlat-server && python3 - <<'PYEOF'
+import re
+p = 'mlat/mlattrack.py'
+s = open(p).read()
+old = "                error = int(math.sqrt(abs(var_est)))"
+new = ("                if not (var_est == var_est):  # NaN guard, bench-local\n"
+       "                    continue\n"
+       "                error = int(math.sqrt(abs(var_est)))")
+assert old in s
+open(p, 'w').write(s.replace(old, new))
+print('patched mlattrack NaN guard')
+PYEOF
+
 # Dependency set per upstream README. Cython modules (clocktrack, geodesy)
 # compile at install time — that's what the compilers above are for.
 # setuptools <81: python-graph-core still imports pkg_resources, which
