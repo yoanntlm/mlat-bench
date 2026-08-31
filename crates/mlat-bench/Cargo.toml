@@ -1,0 +1,24 @@
+[package]
+name = "mlat-bench"
+description = "Replay + benchmark harness for Mode S multilateration servers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mlat-bench"
+path = "src/main.rs"
+
+[dependencies]
+mb-core.workspace = true
+mb-proto.workspace = true
+mb-sim.workspace = true
+mb-capture.workspace = true
+mb-metrics.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

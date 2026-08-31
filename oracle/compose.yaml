@@ -1,0 +1,33 @@
+# The oracle stack: one container, the real mlat-server, pinned.
+#
+# Standalone by design — the harness binary talks to it over localhost TCP and
+# manages its lifecycle with `docker compose -f oracle/compose.yaml ...`.
+# Ports bind to 127.0.0.1 only: this thing has no auth and must never be
+# reachable from anywhere else.
+
+services:
+  oracle:
+    build: .
+    image: mlat-bench-oracle
+    container_name: mlat-bench-oracle
+    restart: "no"            # a crashed oracle should fail the run, not respawn mid-measurement
+    environment:
+      ORACLE_WORK_DIR: /work
+      ORACLE_CLIENT_PORT: "40147"
+      ORACLE_SBS_PORT: "40148"
+      ORACLE_SBS_FILTERED_PORT: "40149"
+    ports:
+      - "127.0.0.1:${ORACLE_CLIENT_PORT:-40147}:40147"
+      - "127.0.0.1:${ORACLE_SBS_PORT:-40148}:40148"
+      - "127.0.0.1:${ORACLE_SBS_FILTERED_PORT:-40149}:40149"
+    volumes:
+      # The orchestrator bind-mounts each run's directory here so results.csv
+      # and sync.json land inside the run artifacts and survive `down`.
+      - ${ORACLE_WORK_DIR:-./work}:/work
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python3", "/healthcheck.py"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+      start_period: 10s

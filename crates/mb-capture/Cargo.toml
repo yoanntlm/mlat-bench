@@ -1,0 +1,16 @@
+[package]
+name = "mb-capture"
+description = "MBC capture container format: per-client timestamped byte streams + ground truth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mb-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+hex.workspace = true

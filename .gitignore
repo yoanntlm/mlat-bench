@@ -1,0 +1,7 @@
+/target
+/runs/
+*.mbc
+*.mbc.zst
+.env
+__pycache__/
+/oracle/upstream/        # read-only clone of mlat-server made by oracle build tooling; never committed
