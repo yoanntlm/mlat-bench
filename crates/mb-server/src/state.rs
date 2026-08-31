@@ -28,6 +28,10 @@ struct Track {
     last_pos: Option<Geodetic>,
     last_time_scaled: f64,
     last_attempt_scaled: f64,
+    /// Consecutive speed-gate rejections; too many means the TRACK is wrong
+    /// (locked onto an early bad fix), so the gate resets rather than
+    /// suppressing a correct stream forever.
+    speed_rejects: u32,
 }
 
 struct SyncPoint {
@@ -374,10 +378,31 @@ impl State {
         for &(rx, t_s, at_scaled) in &g.entries {
             let t_ref = if rx == local_ref {
                 Some((t_s, self.receivers[rx].jitter_s))
+            } else if let Some(direct) = self
+                .pairs
+                .get_mut(&(rx, local_ref))
+                .and_then(|p| p.convert(t_s))
+            {
+                Some(direct)
             } else {
-                self.pairs
-                    .get_mut(&(rx, local_ref))
-                    .and_then(|p| p.convert(t_s))
+                // Two-hop: route through a cluster member that pairs with
+                // both ends. Sigmas add in quadrature; the honest cost of the
+                // detour keeps downstream weighting truthful.
+                let mut best: Option<(f64, f64)> = None;
+                for &h in &members {
+                    if h == rx || h == local_ref {
+                        continue;
+                    }
+                    let hop1 = self.pairs.get_mut(&(rx, h)).and_then(|p| p.convert(t_s));
+                    let Some((t1, s1)) = hop1 else { continue };
+                    let hop2 = self.pairs.get_mut(&(h, local_ref)).and_then(|p| p.convert(t1));
+                    let Some((t2, s2)) = hop2 else { continue };
+                    let sig = (s1 * s1 + s2 * s2).sqrt();
+                    if best.is_none_or(|(_, bs)| sig < bs) {
+                        best = Some((t2, sig));
+                    }
+                }
+                best
             };
             if let Some((t, sigma)) = t_ref {
                 conv.push((rx, t, sigma.max(self.receivers[rx].jitter_s), at_scaled));
@@ -526,6 +551,25 @@ impl State {
                     self.stats_rejected += 1;
                     return;
                 }
+                // Physics continuity: a fix implying > 400 m/s vs a recent
+                // accepted fix is a ghost (the diffuse real-data tail). Five
+                // consecutive rejections reset the TRACK — the gate must
+                // never suppress a correct stream behind one bad early fix.
+                if let Some(last) = track.last_pos {
+                    if elapsed < 30.0
+                        && elapsed > 0.05
+                        && sol.pos.haversine_m(&last) / elapsed > 400.0
+                    {
+                        let t = self.tracks.get_mut(&icao).expect("entry above");
+                        t.speed_rejects += 1;
+                        if t.speed_rejects >= 5 {
+                            t.last_pos = None;
+                            t.speed_rejects = 0;
+                        }
+                        self.stats_rejected += 1;
+                        return;
+                    }
+                }
                 // DF17 (self-truth) fixes: score against the aircraft's own
                 // broadcast position, keep them OUT of results.csv/SBS so the
                 // bench comparison stays apples-to-apples, but DO learn
@@ -588,6 +632,7 @@ impl State {
                 let t = self.tracks.get_mut(&icao).expect("entry above");
                 t.last_pos = Some(sol.pos);
                 t.last_time_scaled = now_scaled;
+                t.speed_rejects = 0;
                 let err_m = sol.err_est_m;
                 let row = format!(
                     "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",
