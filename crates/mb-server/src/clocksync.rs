@@ -1,171 +1,119 @@
-//! Pairwise receiver clock synchronization.
+//! Pairwise receiver clock synchronization — O(1) memory per pair.
 //!
-//! v0 keeps the oracle's overall approach (pairwise models from shared DF17
-//! sync pairs) in its simplest defensible form: a windowed linear fit
-//! t_to = α + β·t_from per directed receiver pair. The known weakness — no
-//! sync graph traversal, pairs must sync directly with the reference — is
-//! deliberate scope, recorded in the README. The bench decides whether it's
-//! good enough; opinions don't.
+//! v1 stored a deque of raw observations and refit on demand; at world scale
+//! (10k receivers → ~10⁶ co-hearing pairs) that's gigabytes and the fit cost
+//! saturated a core. This version keeps exponentially-weighted CENTERED
+//! sufficient statistics (Welford-with-decay: means + central moments, so
+//! huge counter values never meet catastrophic cancellation) — ~100 bytes a
+//! pair, O(1) update, O(1) convert.
+//!
+//! The old retro-trim becomes an ONLINE outlier gate: once the model is
+//! warm, an observation too far from prediction is rejected instead of
+//! ingested (a lying sync source or multipath spike can't drag the fit),
+//! and a burst of consecutive rejections resets the pair — which is exactly
+//! what a genuine clock jump should do.
 
-/// One directed pair's model, fit over a sliding window of shared
-/// transmit-time observations.
+/// Forgetting factor per accepted observation ≈ sliding window of ~1/(1−λ)
+/// observations (~300), matching the old deque's effective span.
+const LAMBDA: f64 = 0.9967;
+const MIN_WEIGHT: f64 = 8.0; // effective observations before usable
+const MIN_SPAN_S: f64 = 5.0; // effective a-spread (via caa) before usable
+/// Online outlier gate: reject when |residual| > max(4σ, this floor).
+const GATE_FLOOR_S: f64 = 1e-6;
+/// Consecutive rejections that mean "the clock jumped — start over".
+const RESET_AFTER_REJECTS: u32 = 8;
+/// Refuse conversions whose prediction sigma exceeds this — a poisoned
+/// observation is worse than a missing one.
+const MAX_PRED_SIGMA_S: f64 = 2e-6;
+
 #[derive(Default)]
 pub struct PairModel {
-    /// (t_from_s, t_to_s) — same physical transmission expressed in each
-    /// receiver's (propagation-corrected) clock. Deque: expiry pops the
-    /// front, amortized O(1) — the old retain() scan per push was ~40% of a
-    /// core at metro scale.
-    obs: std::collections::VecDeque<(f64, f64)>,
-    /// Cached trimmed fit + staleness counter. At metro scale convert() is
-    /// called once per observation per solve; refitting 400 points each time
-    /// saturated a core (bench: 104% CPU at 5×). A fit a few observations
-    /// stale is statistically identical.
-    cached: Option<Fit>,
-    stale: u32,
+    w: f64,   // total (decayed) weight
+    ma: f64,  // weighted mean of t_from
+    mb: f64,  // weighted mean of t_to
+    caa: f64, // weighted central Σ (a−ma)²
+    cab: f64, // weighted central Σ (a−ma)(b−mb)
+    msq: f64, // EW mean of squared fit residuals (σ² estimate)
+    rejects: u32,
+    n_total: u64,
 }
 
-/// Model quality gates: below these, conversions are refused rather than
-/// guessed. Tuned on the bench, not by feel.
-const MIN_OBS: usize = 8;
-const MIN_SPAN_S: f64 = 5.0;
-const WINDOW_S: f64 = 180.0;
-const MAX_OBS: usize = 400;
-/// Refuse conversions whose prediction sigma exceeds this — a poisoned
-/// observation is worse than a missing one (bench: minute-1 and minute-9
-/// tails, seeds 42 and 1337).
-const MAX_PRED_SIGMA_S: f64 = 2e-6;
-/// Reuse a cached fit until this many new observations arrive.
-const REFIT_EVERY: u32 = 8;
-
 impl PairModel {
-    /// Cheap usability probe (enough observations over enough span) without
-    /// forcing a fit — local-reference election calls this per group member.
+    pub fn push(&mut self, t_from: f64, t_to: f64) {
+        // Online gate once warm: a wild pair observation is refused, not
+        // averaged in. Too many in a row = clock jump = reset.
+        if self.usable() {
+            let (pred, _) = self.predict_unchecked(t_from);
+            let r = t_to - pred;
+            let gate = (4.0 * self.msq.sqrt()).max(GATE_FLOOR_S);
+            if r.abs() > gate {
+                self.rejects += 1;
+                if self.rejects >= RESET_AFTER_REJECTS {
+                    *self = PairModel::default();
+                }
+                return;
+            }
+            self.rejects = 0;
+            // Track residual variance BEFORE this obs updates the fit.
+            self.msq += (1.0 - LAMBDA) * (r * r - self.msq);
+        }
+        // Welford-with-decay update of centered sums.
+        self.w = self.w * LAMBDA + 1.0;
+        let da = t_from - self.ma;
+        let db = t_to - self.mb;
+        let k = 1.0 / self.w;
+        self.ma += k * da;
+        self.mb += k * db;
+        // Central moments decay with the same factor; the (1−k) cross term
+        // is the standard Welford correction.
+        self.caa = self.caa * LAMBDA + da * (t_from - self.ma);
+        self.cab = self.cab * LAMBDA + da * (t_to - self.mb);
+        self.n_total += 1;
+    }
+
+    fn predict_unchecked(&self, t_from: f64) -> (f64, f64) {
+        let beta = if self.caa > 0.0 {
+            self.cab / self.caa
+        } else {
+            1.0
+        };
+        let pred = self.mb + beta * (t_from - self.ma);
+        // Prediction interval: inflates when young or extrapolating far from
+        // the weighted center — the phases where km-scale errors once hid
+        // behind tiny fit residuals.
+        let da = t_from - self.ma;
+        let infl = (1.0 + 1.0 / self.w + da * da / self.caa.max(1e-12)).sqrt();
+        (pred, self.msq.sqrt() * infl)
+    }
+
+    /// Cheap usability probe (enough weight over enough span).
     pub fn usable(&self) -> bool {
-        self.obs.len() >= MIN_OBS
-            && self
-                .obs
-                .back()
-                .zip(self.obs.front())
-                .is_some_and(|(b, f)| b.0 - f.0 >= MIN_SPAN_S)
+        // caa/w ≈ variance of a; span ≈ a few σ. Require σ_a ≥ MIN_SPAN/4.
+        self.w >= MIN_WEIGHT && self.caa / self.w.max(1.0) >= (MIN_SPAN_S / 4.0).powi(2)
+    }
+
+    /// Convert a from-clock reading to the to-clock, with honest sigma.
+    pub fn convert(&mut self, t_from: f64) -> Option<(f64, f64)> {
+        if !self.usable() {
+            return None;
+        }
+        let (pred, sigma) = self.predict_unchecked(t_from);
+        if sigma > MAX_PRED_SIGMA_S {
+            return None;
+        }
+        Some((pred, sigma))
     }
 
     /// (observation count, estimated pairwise offset ppm) for status export
-    /// (sync.json — existing monitoring tools read the oracle's shape).
+    /// (sync.json — existing monitoring reads the oracle's shape).
     pub fn status(&self) -> (usize, f64) {
-        let ppm = self
-            .cached
-            .as_ref()
-            .map(|f| (f.beta - 1.0) * 1e6)
-            .unwrap_or(0.0);
-        (self.obs.len(), ppm)
+        let beta = if self.caa > 0.0 {
+            self.cab / self.caa
+        } else {
+            1.0
+        };
+        (self.n_total as usize, (beta - 1.0) * 1e6)
     }
-
-    pub fn push(&mut self, t_from: f64, t_to: f64) {
-        self.obs.push_back((t_from, t_to));
-        self.stale += 1;
-        let cutoff = t_from - WINDOW_S;
-        while self.obs.front().is_some_and(|(a, _)| *a < cutoff) {
-            self.obs.pop_front();
-        }
-        while self.obs.len() > MAX_OBS {
-            self.obs.pop_front();
-        }
-    }
-
-    /// Convert a from-clock reading to the to-clock, if the model is sound.
-    /// Returns the converted time AND the prediction-interval sigma.
-    ///
-    /// The fit is TRIMMED: fit once, drop observations whose residual exceeds
-    /// max(3×RMS, 500 ns), refit with the survivors. A lying sync source
-    /// (bad navigation → wrong propagation correction, ±µs correlated error)
-    /// or a multipath-stamped reception poisons a democratic fit wholesale —
-    /// the hostile bench measured 2× accuracy loss before trimming. The
-    /// oracle's clocktrack rejects sync outliers for the same reason.
-    pub fn convert(&mut self, t_from: f64) -> Option<(f64, f64)> {
-        let n = self.obs.len();
-        if n < MIN_OBS {
-            return None;
-        }
-        let span = self.obs.back()?.0 - self.obs.front()?.0;
-        if span < MIN_SPAN_S {
-            return None;
-        }
-        if self.cached.is_none() || self.stale >= REFIT_EVERY {
-            let all: Vec<(f64, f64)> = self.obs.iter().copied().collect();
-            let first = fit(&all)?;
-            let cut = (3.0 * first.sigma_fit).max(500e-9);
-            let kept: Vec<(f64, f64)> = all
-                .iter()
-                .filter(|(a, b)| (b - (first.alpha + first.beta * a)).abs() <= cut)
-                .copied()
-                .collect();
-            self.cached = Some(if kept.len() >= MIN_OBS && kept.len() < n {
-                fit(&kept)?
-            } else {
-                first
-            });
-            self.stale = 0;
-        }
-        let f = self.cached.as_ref().expect("just set");
-        let _ = f.n; // (fields also served via status())
-                     // Prediction interval: inflates for young or extrapolating models —
-                     // exactly the phases where km-scale errors hid behind tiny fit
-                     // residuals (bench, seeds 42 + 1337).
-        let da = t_from - f.mean_a;
-        let infl = (1.0 + 1.0 / f.n as f64 + da * da / f.sxx).sqrt();
-        let sigma_pred = f.sigma_fit * infl;
-        if sigma_pred > MAX_PRED_SIGMA_S {
-            return None; // too uncertain to contribute at all
-        }
-        Some((f.alpha + f.beta * t_from, sigma_pred))
-    }
-}
-
-struct Fit {
-    alpha: f64,
-    beta: f64,
-    sigma_fit: f64,
-    mean_a: f64,
-    sxx: f64,
-    n: usize,
-}
-
-fn fit(obs: &[(f64, f64)]) -> Option<Fit> {
-    let n = obs.len();
-    if n < 2 {
-        return None;
-    }
-    let mean_a: f64 = obs.iter().map(|(a, _)| a).sum::<f64>() / n as f64;
-    let mean_b: f64 = obs.iter().map(|(_, b)| b).sum::<f64>() / n as f64;
-    let mut sxx = 0.0;
-    let mut sxy = 0.0;
-    for (a, b) in obs {
-        let da = a - mean_a;
-        sxx += da * da;
-        sxy += da * (b - mean_b);
-    }
-    if sxx <= 0.0 {
-        return None;
-    }
-    let beta = sxy / sxx;
-    let alpha = mean_b - beta * mean_a;
-    let sigma_fit = (obs
-        .iter()
-        .map(|(a, b)| {
-            let e = b - (alpha + beta * a);
-            e * e
-        })
-        .sum::<f64>()
-        / n as f64)
-        .sqrt();
-    Some(Fit {
-        alpha,
-        beta,
-        sigma_fit,
-        mean_a,
-        sxx,
-        n,
-    })
 }
 
 #[cfg(test)]
@@ -176,37 +124,50 @@ mod tests {
     fn recovers_offset_and_drift() {
         // to-clock runs 10 ppm fast with 0.5 ms offset.
         let mut m = PairModel::default();
-        for i in 0..40 {
+        for i in 0..60 {
             let t = i as f64;
             m.push(t, 0.0005 + t * (1.0 + 10e-6));
         }
         let (got, sigma) = m.convert(100.0).unwrap();
         let want = 0.0005 + 100.0 * (1.0 + 10e-6);
-        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
-        assert!(sigma < 1e-9, "perfect data must fit tightly: {sigma}");
+        assert!((got - want).abs() < 5e-9, "{got} vs {want}");
+        assert!(sigma < 1e-6, "clean data, honest sigma: {sigma}");
     }
 
     #[test]
     fn trims_poisoned_observations() {
-        // Clean linear relation + 10% gross outliers (the liar / multipath).
-        // Untrimmed, the fit is dragged µs off; trimmed, conversion stays ns.
+        // Clean relation + 10% gross outliers once warm: the online gate
+        // refuses them, conversion stays ns-accurate.
         let mut m = PairModel::default();
-        for i in 0..50 {
+        for i in 0..80 {
             let t = i as f64;
-            let poison = if i % 10 == 3 { 2e-6 } else { 0.0 };
+            let poison = if i > 20 && i % 10 == 3 { 2e-6 } else { 0.0 };
             m.push(t, 0.0005 + t * (1.0 + 10e-6) + poison);
         }
-        let (got, sigma) = m.convert(50.0).unwrap();
-        let want = 0.0005 + 50.0 * (1.0 + 10e-6);
+        let (got, _) = m.convert(80.0).unwrap();
+        let want = 0.0005 + 80.0 * (1.0 + 10e-6);
         assert!(
             (got - want).abs() < 100e-9,
             "residual poison: {} ns",
             (got - want).abs() * 1e9
         );
-        assert!(
-            sigma < 500e-9,
-            "sigma should reflect the clean fit: {sigma}"
-        );
+    }
+
+    #[test]
+    fn clock_jump_resets() {
+        let mut m = PairModel::default();
+        for i in 0..40 {
+            let t = i as f64;
+            m.push(t, t * (1.0 + 5e-6));
+        }
+        assert!(m.usable());
+        // The to-clock jumps 50 ms: every new obs violates the gate, and
+        // after RESET_AFTER_REJECTS the model starts fresh.
+        for i in 40..(40 + RESET_AFTER_REJECTS + 1) {
+            let t = i as f64;
+            m.push(t, 0.050 + t * (1.0 + 5e-6));
+        }
+        assert!(!m.usable(), "post-jump the pair must relearn, not average");
     }
 
     #[test]

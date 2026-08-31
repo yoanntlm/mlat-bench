@@ -7,7 +7,6 @@ use crate::solve::{self, Observation};
 use crate::track::TrackFilter;
 use mb_core::{Ecef, Geodetic, Icao, C_MPS};
 use std::collections::HashMap;
-use std::io::Write;
 use std::time::Instant;
 
 pub struct ReceiverInfo {
@@ -77,17 +76,12 @@ pub struct Published {
 }
 
 pub struct State {
-    /// Fan-out for accepted fixes (SBS listeners + result-subscribed
-    /// clients). Lossy by design: a slow consumer drops, the solver never
-    /// blocks.
-    pub publish: tokio::sync::broadcast::Sender<std::sync::Arc<Published>>,
+    /// Where finished rows go (the output task owns all writers and fan-out;
+    /// shards never touch files). Lossy try_send: the solver never blocks.
+    out: Option<tokio::sync::mpsc::Sender<crate::shard::OutMsg>>,
     /// Last CPR-decoded position per ADS-B aircraft + output-clock stamp —
     /// the self-truth reference (the aircraft's own broadcast position).
     adsb_pos: HashMap<Icao, (Geodetic, f64)>,
-    /// When set, DF17 frames are multilaterated too and scored against the
-    /// aircraft's own ADS-B position — real-world accuracy without external
-    /// ground truth. Rows go here, NOT into results.csv.
-    self_truth_csv: Option<std::io::BufWriter<std::fs::File>>,
     pub mlat_adsb: bool,
     /// Min-tracked offset between the output clock and the reference
     /// receiver's clock. Results are stamped from the SOLVED reference time
@@ -105,8 +99,9 @@ pub struct State {
     alts_ft: HashMap<Icao, i32>,
     tracks: HashMap<Icao, Track>,
     filters: HashMap<Icao, TrackFilter>,
-    csv: std::io::BufWriter<std::fs::File>,
-    filtered_csv: Option<std::io::BufWriter<std::fs::File>>,
+    /// Emit alpha-beta-smoothed twins of each row (experimental; benched
+    /// losing on real data — kept opt-in).
+    emit_filtered: bool,
     // Scaled output clock (matches the oracle's faked-clock behavior at
     // accelerated replay; see the harness's scoring anchor).
     t0_real: Instant,
@@ -118,23 +113,13 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(
-        csv_path: &std::path::Path,
-        time_scale: f64,
-        self_truth_csv: Option<&std::path::Path>,
-        mlat_adsb: bool,
-        filtered_csv: Option<&std::path::Path>,
-    ) -> anyhow::Result<Self> {
-        let (publish, _) = tokio::sync::broadcast::channel(1024);
-        Ok(State {
-            publish,
+    pub fn new(time_scale: f64, mlat_adsb: bool, emit_filtered: bool) -> Self {
+        State {
+            out: None,
             adsb_pos: HashMap::new(),
             stamp_offset: HashMap::new(),
-            self_truth_csv: match self_truth_csv {
-                Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
-                None => None,
-            },
             mlat_adsb,
+            emit_filtered,
             rx_bias: Vec::new(),
             receivers: Vec::new(),
             reference: None,
@@ -144,20 +129,26 @@ impl State {
             alts_ft: HashMap::new(),
             tracks: HashMap::new(),
             filters: HashMap::new(),
-            csv: std::io::BufWriter::new(std::fs::File::create(csv_path)?),
-            filtered_csv: match filtered_csv {
-                Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
-                None => None,
-            },
             t0_real: Instant::now(),
             t0_unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs_f64(),
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
             time_scale,
             stats_solved: 0,
             stats_rejected: 0,
             stats_sync_obs: 0,
-        })
+        }
+    }
+
+    pub fn set_output(&mut self, tx: tokio::sync::mpsc::Sender<crate::shard::OutMsg>) {
+        self.out = Some(tx);
+    }
+
+    fn emit(&self, msg: crate::shard::OutMsg) {
+        if let Some(tx) = &self.out {
+            let _ = tx.try_send(msg); // lossy by design under output pressure
+        }
     }
 
     /// The server's output clock: real time, scaled. At time_scale 1 this is
@@ -605,20 +596,14 @@ impl State {
                     if let Some((claimed, at)) = self.adsb_pos.get(&icao).copied() {
                         if (now_scaled - at).abs() < 5.0 {
                             let err = sol.pos.haversine_m(&claimed);
-                            if let Some(w) = self.self_truth_csv.as_mut() {
-                                let _ = w.write_all(
-                                    format!(
-                                        "{:.3},{},{:.1},{:.1},{}\n",
-                                        stamp,
-                                        icao.to_hex(),
-                                        err,
-                                        sol.err_est_m,
-                                        obs.len()
-                                    )
-                                    .as_bytes(),
-                                );
-                                let _ = w.flush();
-                            }
+                            self.emit(crate::shard::OutMsg::SelfTruth(format!(
+                                "{:.3},{},{:.1},{:.1},{}\n",
+                                stamp,
+                                icao.to_hex(),
+                                err,
+                                sol.err_est_m,
+                                obs.len()
+                            )));
                         }
                     }
                     return;
@@ -659,42 +644,34 @@ impl State {
                     users.join(","),
                     obs.len().saturating_sub(4),
                 );
-                let _ = self.csv.write_all(row.as_bytes());
-                let _ = self.csv.flush();
-                // Smoothed twin: same columns, alpha-beta-filtered position.
-                let sm_for_filtered = if self.filtered_csv.is_some() {
-                    Some(match self.filters.get_mut(&icao) {
+                // Smoothed twin (experimental): same columns, filtered position.
+                let filtered_line = if self.emit_filtered {
+                    let sm = match self.filters.get_mut(&icao) {
                         Some(f) => f.update(sol.pos, stamp, sol.err_est_m),
                         None => {
                             self.filters.insert(icao, TrackFilter::new(sol.pos, stamp));
                             sol.pos
                         }
-                    })
+                    };
+                    Some(format!(
+                        "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",
+                        stamp,
+                        icao.to_hex(),
+                        sm.lat_deg,
+                        sm.lon_deg,
+                        alt_ft,
+                        err_m,
+                        obs.len(),
+                        obs.len(),
+                        users.join(","),
+                        obs.len().saturating_sub(4),
+                    ))
                 } else {
                     None
                 };
-                if let (Some(sm), Some(w)) = (sm_for_filtered, self.filtered_csv.as_mut()) {
-                    let _ = w.write_all(
-                        format!(
-                            "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",
-                            stamp,
-                            icao.to_hex(),
-                            sm.lat_deg,
-                            sm.lon_deg,
-                            alt_ft,
-                            err_m,
-                            obs.len(),
-                            obs.len(),
-                            users.join(","),
-                            obs.len().saturating_sub(4),
-                        )
-                        .as_bytes(),
-                    );
-                    let _ = w.flush();
-                }
-                // Fan out: SBS (readsb ingest) and result messages
-                // (mlat-client "old" format — field-for-field the oracle's
-                // report_mlat_position_old).
+                // Fan out via the output task: CSV, SBS (readsb ingest) and
+                // result messages (mlat-client "old" format, field-for-field
+                // the oracle's report_mlat_position_old).
                 let (d, tm) = sbs_datetime(stamp);
                 let sbs_line = format!(
                     "MSG,3,1,1,{},1,{d},{tm},{d},{tm},,{alt_ft},,,{:.5},{:.5},,,,,,0\r\n",
@@ -709,9 +686,15 @@ impl State {
                     sol.pos.lon_deg,
                     obs.len()
                 );
-                let _ = self.publish.send(std::sync::Arc::new(Published {
-                    sbs_line,
-                    result_line,
+                self.emit(crate::shard::OutMsg::Fix(crate::shard::OutRow {
+                    icao,
+                    stamp,
+                    csv_line: row,
+                    filtered_line,
+                    published: Published {
+                        sbs_line,
+                        result_line,
+                    },
                 }));
             }
             None => {

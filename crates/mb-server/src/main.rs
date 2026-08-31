@@ -13,6 +13,7 @@
 //!       --addr 127.0.0.1:40160 --results-csv /tmp/cand.csv
 
 mod clocksync;
+mod shard;
 mod solve;
 mod state;
 mod track;
@@ -20,10 +21,12 @@ mod track;
 use anyhow::{Context, Result};
 use clap::Parser;
 use mb_proto::framing::ZlibFrameDecoder;
-use state::{ReceiverInfo, State};
-use std::sync::{Arc, Mutex};
+use shard::{OutMsg, Router, ShardHandle, ShardMsg};
+use state::{Published, ReceiverInfo, State};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 #[derive(Parser)]
@@ -53,6 +56,10 @@ struct Cli {
     /// so existing monitoring keeps working.
     #[arg(long)]
     work_dir: Option<std::path::PathBuf>,
+    /// Shard count (0 = auto: available cores − 2, min 1). Each shard owns
+    /// an independent geographic slice; see shard.rs.
+    #[arg(long, default_value_t = 0)]
+    shards: usize,
     /// Alpha-beta-smoothed results, same CSV format — the drop-in analogue
     /// of the oracle's Kalman output. Score raw vs filtered to see if it
     /// earns its place.
@@ -69,13 +76,13 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mlat_adsb = cli.self_truth_csv.is_some();
-    let state = Arc::new(Mutex::new(State::new(
-        &cli.write_csv,
-        cli.time_scale,
-        cli.self_truth_csv.as_deref(),
-        mlat_adsb,
-        cli.write_filtered_csv.as_deref(),
-    )?));
+    let n_shards = if cli.shards == 0 {
+        std::thread::available_parallelism()
+            .map(|n| (n.get().saturating_sub(2)).max(1))
+            .unwrap_or(1)
+    } else {
+        cli.shards
+    };
     let listen = cli
         .client_listen
         .as_deref()
@@ -89,40 +96,101 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_else(|| cli.listen.clone());
 
-    // Sweeper: solves aged groups.
+    // ---- output task: owns every writer, dedupes boundary aircraft -------
+    let (out_tx, mut out_rx) = mpsc::channel::<OutMsg>(4096);
+    let (publish, _) = tokio::sync::broadcast::channel::<Arc<Published>>(1024);
     {
-        let state = state.clone();
-        let window = Duration::from_millis(cli.group_window_ms);
+        use std::io::Write;
+        let publish = publish.clone();
+        let mut csv = std::io::BufWriter::new(std::fs::File::create(&cli.write_csv)?);
+        let mut filtered = match &cli.write_filtered_csv {
+            Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+            None => None,
+        };
+        let mut selftruth = match &cli.self_truth_csv {
+            Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+            None => None,
+        };
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(10));
-            loop {
-                tick.tick().await;
-                state.lock().unwrap().sweep(window);
+            // Boundary aircraft may be solved by two shards within the same
+            // instant; drop the twin by (icao, 100 ms bucket).
+            let mut recent: std::collections::HashMap<(u32, i64), ()> = Default::default();
+            let mut order: std::collections::VecDeque<(u32, i64)> = Default::default();
+            while let Some(msg) = out_rx.recv().await {
+                match msg {
+                    OutMsg::SelfTruth(line) => {
+                        if let Some(w) = selftruth.as_mut() {
+                            let _ = w.write_all(line.as_bytes());
+                            let _ = w.flush();
+                        }
+                    }
+                    OutMsg::Fix(row) => {
+                        let key = (row.icao.0, (row.stamp * 10.0) as i64);
+                        if recent.contains_key(&key) {
+                            continue; // boundary twin
+                        }
+                        recent.insert(key, ());
+                        order.push_back(key);
+                        while order.len() > 4096 {
+                            if let Some(k) = order.pop_front() {
+                                recent.remove(&k);
+                            }
+                        }
+                        let _ = csv.write_all(row.csv_line.as_bytes());
+                        let _ = csv.flush();
+                        if let (Some(w), Some(l)) = (filtered.as_mut(), &row.filtered_line) {
+                            let _ = w.write_all(l.as_bytes());
+                            let _ = w.flush();
+                        }
+                        let _ = publish.send(Arc::new(row.published));
+                    }
+                }
             }
         });
     }
-    // Stats line every 10 s so a run is observable.
+
+    // ---- shards ----------------------------------------------------------
+    let window = Duration::from_millis(cli.group_window_ms);
+    let mut handles = Vec::new();
+    for _ in 0..n_shards {
+        let (tx, rx) = mpsc::channel::<ShardMsg>(8192);
+        let state = State::new(cli.time_scale, mlat_adsb, cli.write_filtered_csv.is_some());
+        tokio::spawn(shard::run_shard(state, rx, out_tx.clone(), window));
+        handles.push(Arc::new(ShardHandle {
+            tx,
+            receivers: std::sync::atomic::AtomicUsize::new(0),
+        }));
+    }
+    let router = Arc::new(Router::new(handles));
+    println!("mb-server: {n_shards} shards");
+
+    // Stats line every 10 s, aggregated across shards.
     {
-        let state = state.clone();
+        let router = router.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             loop {
                 tick.tick().await;
-                let s = state.lock().unwrap();
-                println!(
-                    "mb-server: rx={} sync_obs={} solved={} rejected={}",
-                    s.receivers.len(),
-                    s.stats_sync_obs,
-                    s.stats_solved,
-                    s.stats_rejected
-                );
+                let (mut rx_n, mut sync_o, mut solved, mut rej) = (0usize, 0u64, 0u64, 0u64);
+                for sh in router.all() {
+                    let (otx, orx) = oneshot::channel();
+                    if sh.tx.send(ShardMsg::Stats(otx)).await.is_ok() {
+                        if let Ok((a, b, c, d)) = orx.await {
+                            rx_n += a;
+                            sync_o += b;
+                            solved += c;
+                            rej += d;
+                        }
+                    }
+                }
+                println!("mb-server: rx={rx_n} sync_obs={sync_o} solved={solved} rejected={rej}");
             }
         });
     }
 
     // SBS output listener: each consumer gets the broadcast fix stream.
     if let Some(addr) = cli.basestation_listen.clone() {
-        let state = state.clone();
+        let publish = publish.clone();
         tokio::spawn(async move {
             let Ok(l) = TcpListener::bind(&addr).await else {
                 eprintln!("mb-server: cannot bind SBS listener {addr}");
@@ -133,7 +201,7 @@ async fn main() -> Result<()> {
                 let Ok((mut sock, _)) = l.accept().await else {
                     break;
                 };
-                let mut rx = state.lock().unwrap().publish.subscribe();
+                let mut rx = publish.subscribe();
                 tokio::spawn(async move {
                     while let Ok(p) = rx.recv().await {
                         if sock.write_all(p.sbs_line.as_bytes()).await.is_err() {
@@ -144,18 +212,26 @@ async fn main() -> Result<()> {
             }
         });
     }
-    // sync.json export for existing monitoring.
+    // sync.json export for existing monitoring — merged across shards.
     if let Some(dir) = cli.work_dir.clone() {
-        let state = state.clone();
+        let router = router.clone();
         let _ = std::fs::create_dir_all(&dir);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tick.tick().await;
-                let v = state.lock().unwrap().sync_json();
+                let mut merged = serde_json::Map::new();
+                for sh in router.all() {
+                    let (otx, orx) = oneshot::channel();
+                    if sh.tx.send(ShardMsg::SyncJson(otx)).await.is_ok() {
+                        if let Ok(serde_json::Value::Object(m)) = orx.await {
+                            merged.extend(m);
+                        }
+                    }
+                }
                 let _ = std::fs::write(
                     dir.join("sync.json"),
-                    serde_json::to_vec(&v).unwrap_or_default(),
+                    serde_json::to_vec(&serde_json::Value::Object(merged)).unwrap_or_default(),
                 );
             }
         });
@@ -168,20 +244,34 @@ async fn main() -> Result<()> {
     let hb_real = Duration::from_secs_f64(30.0 / cli.time_scale);
     loop {
         let (stream, peer) = listener.accept().await?;
-        let state = state.clone();
+        let router = router.clone();
+        let publish = publish.clone();
+        let scale = cli.time_scale;
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, state, hb_real).await {
+            if let Err(e) = handle_client(stream, router, publish, hb_real, scale).await {
                 eprintln!("mb-server: {peer}: {e:#}");
             }
         });
     }
 }
 
+/// Output clock (unix seconds, scaled) for heartbeats — shard-independent.
+fn scaled_now(t0_unix: f64, t0: std::time::Instant, scale: f64) -> f64 {
+    t0_unix + t0.elapsed().as_secs_f64() * scale
+}
+
 async fn handle_client(
     stream: TcpStream,
-    state: Arc<Mutex<State>>,
+    router: Arc<Router>,
+    publish: tokio::sync::broadcast::Sender<Arc<Published>>,
     hb_real: Duration,
+    time_scale: f64,
 ) -> Result<()> {
+    let conn_t0 = std::time::Instant::now();
+    let conn_t0_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
     stream.set_nodelay(true)?;
     let (rd, mut wr) = stream.into_split();
     let mut rd = BufReader::new(rd);
@@ -232,17 +322,29 @@ async fn handle_client(
         alt_m: alt,
     };
     let gps = clock_type.starts_with("radarcape_gps");
-    let rx = state.lock().unwrap().add_receiver(ReceiverInfo {
-        user: user.clone(),
-        ecef: geo.to_ecef(),
-        geo,
-        freq_hz,
-        gps,
-        // Effective timing error: clock jitter + pair-model slack. GPS
-        // clocks convert near-losslessly; free-running clocks carry the
-        // sync model's noise on top of their own.
-        jitter_s: if gps { 30e-9 } else { 150e-9 },
-    });
+    // Route by geography: this receiver's shard owns it for life.
+    let (_shard_idx, shard) = router.shard_for(lat, lon);
+    shard
+        .receivers
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (otx, orx) = oneshot::channel();
+    shard
+        .tx
+        .send(ShardMsg::AddReceiver(
+            ReceiverInfo {
+                user: user.clone(),
+                ecef: geo.to_ecef(),
+                geo,
+                freq_hz,
+                gps,
+                // Effective timing error: clock jitter + pair-model slack.
+                jitter_s: if gps { 30e-9 } else { 150e-9 },
+            },
+            otx,
+        ))
+        .await
+        .map_err(|_| anyhow::anyhow!("shard gone"))?;
+    let rx = orx.await.map_err(|_| anyhow::anyhow!("shard gone"))?;
     let wants_results = hs["return_results"].as_bool().unwrap_or(false);
     // Real mlat-client withholds ALL traffic until asked: selective traffic
     // is not optional politeness, it is the request channel (dress-rehearsal
@@ -268,7 +370,7 @@ async fn handle_client(
         }
     });
     if wants_results {
-        let mut sub = state.lock().unwrap().publish.subscribe();
+        let mut sub = publish.subscribe();
         let tx = tx_line.clone();
         tokio::spawn(async move {
             while let Ok(p) = sub.recv().await {
@@ -293,10 +395,13 @@ async fn handle_client(
             None => {
                 let mut line = Vec::new();
                 tokio::select! {
-                    _ = hb.tick() => send_heartbeat(&state, &tx_line).await?,
+                    _ = hb.tick() => {
+                        let st = scaled_now(conn_t0_unix, conn_t0, time_scale);
+                        let _ = tx_line.send(format!("{{\"heartbeat\":{{\"server_time\":{st:.3}}}}}\n")).await;
+                    }
                     r = rd.read_until(b'\n', &mut line) => {
                         if r? == 0 { break }
-                        process_line_tx(&state, rx, &line, Some(&tx_line), &mut requested);
+                        process_line_tx(&shard, rx, &line, Some(&tx_line), &mut requested).await;
                     }
                 }
             }
@@ -306,7 +411,11 @@ async fn handle_client(
                 // capture generator uses, exercised from the other side).
                 let mut lenb = [0u8; 2];
                 tokio::select! {
-                    _ = hb.tick() => { send_heartbeat(&state, &tx_line).await?; continue }
+                    _ = hb.tick() => {
+                        let st = scaled_now(conn_t0_unix, conn_t0, time_scale);
+                        let _ = tx_line.send(format!("{{\"heartbeat\":{{\"server_time\":{st:.3}}}}}\n")).await;
+                        continue
+                    }
                     r = rd.read_exact(&mut lenb) => {
                         if r.is_err() { break }
                     }
@@ -322,7 +431,7 @@ async fn handle_client(
                 };
                 for line in chunk.split(|b| *b == b'\n') {
                     if !line.is_empty() {
-                        process_line_tx(&state, rx, line, Some(&tx_line), &mut requested);
+                        process_line_tx(&shard, rx, line, Some(&tx_line), &mut requested).await;
                     }
                 }
             }
@@ -334,20 +443,10 @@ async fn handle_client(
     Ok(())
 }
 
-async fn send_heartbeat(
-    state: &Arc<Mutex<State>>,
-    tx: &tokio::sync::mpsc::Sender<String>,
-) -> Result<()> {
-    let st = state.lock().unwrap().scaled_now();
-    let line = format!("{{\"heartbeat\":{{\"server_time\":{st:.3}}}}}\n");
-    let _ = tx.send(line).await;
-    Ok(())
-}
-
 /// seen/rate_report trigger start_sending for aircraft not yet requested on
 /// this connection — a real mlat-client withholds everything until asked.
-fn process_line_tx(
-    state: &Arc<Mutex<State>>,
+async fn process_line_tx(
+    shard: &Arc<ShardHandle>,
     rx: usize,
     line: &[u8],
     tx: Option<&tokio::sync::mpsc::Sender<String>>,
@@ -384,7 +483,6 @@ fn process_line_tx(
             let _ = tx.try_send(msg);
         }
     }
-    let mut s = state.lock().unwrap();
     if let Some(sy) = v.get("sync") {
         let (Some(et), Some(ot), Some(em), Some(om)) = (
             sy["et"].as_f64(),
@@ -394,14 +492,30 @@ fn process_line_tx(
         ) else {
             return;
         };
-        s.on_sync(rx, et, ot, em, om);
+        let _ = shard
+            .tx
+            .send(ShardMsg::Sync {
+                rx,
+                et,
+                ot,
+                em: em.to_string(),
+                om: om.to_string(),
+            })
+            .await;
     } else if let Some(ml) = v.get("mlat") {
         let (Some(t), Some(m)) = (ml["t"].as_f64(), ml["m"].as_str()) else {
             return;
         };
-        s.on_mlat(rx, t, m);
+        let _ = shard
+            .tx
+            .send(ShardMsg::Mlat {
+                rx,
+                t,
+                m: m.to_string(),
+            })
+            .await;
     } else if v.get("clock_reset").is_some() || v.get("clock_jump").is_some() {
-        s.clock_reset(rx);
+        let _ = shard.tx.send(ShardMsg::ClockReset { rx }).await;
     }
     // seen/lost/heartbeat/rate_report/input_*: no state needed yet.
 }
