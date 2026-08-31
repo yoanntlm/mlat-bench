@@ -187,6 +187,12 @@ Open frontier, stated plainly: the real-world p99 (~1 km) and the ~0.15 %
 ghost floor — diffuse geometry events, not sensor-attributable (adaptive
 receiver quarantine exists and benched neutral on this slice).
 
+Generalization: an entirely different LocaRDS slice (subset 2 — different
+hour, different sensor mix, never used during development) scores
+statistically identical to the development slice: p50 91 vs 93 m, coverage
+27 vs 25 %, ghost rate 0.17 vs 0.18 %, self-truth 128 m on both. The tuning
+transferred; nothing was fit to one sky.
+
 Durability, hour scale: a full 3600 s of the same feed (2× replay) produced
 202,903 positions at p50 104 m with the ghost rate stable at 0.13 %, RSS
 capped at 70 MB and CPU ≤ 29 % over 908 samples — no leak, no sync decay
