@@ -54,6 +54,7 @@ pub async fn replay(
     speed: f64,
     addr: Option<&str>,
     results_csv: Option<&Path>,
+    sample_pid: Option<u32>,
 ) -> Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -66,7 +67,9 @@ pub async fn replay(
     std::fs::create_dir_all(&run_dir)?;
     match addr {
         None => replay_capture(capture, &run_dir, speed).await,
-        Some(addr) => replay_external(capture, &run_dir, speed, addr, results_csv).await,
+        Some(addr) => {
+            replay_external(capture, &run_dir, speed, addr, results_csv, sample_pid).await
+        }
     }
 }
 
@@ -81,6 +84,7 @@ async fn replay_external(
     speed: f64,
     addr: &str,
     results_csv: Option<&Path>,
+    sample_pid: Option<u32>,
 ) -> Result<()> {
     anyhow::ensure!((1.0..=100.0).contains(&speed), "speed must be in 1..=100");
     let reader = Arc::new(CaptureReader::open(capture).map_err(|e| anyhow::anyhow!("{e}"))?);
@@ -95,8 +99,14 @@ async fn replay_external(
         .as_secs_f64()
         + 2.0;
     let hb_anchor: HbAnchor = Arc::new(std::sync::Mutex::new(None));
+    let stop_at = t0 + Duration::from_secs_f64((duration_s + DRAIN_S) as f64 / speed);
+    let sampler = sample_pid
+        .map(|pid| tokio::spawn(sample_proc(pid, run_dir.join("resources.jsonl"), stop_at)));
     let result =
         drive_clients_only(reader, run_dir, duration_s, t0, speed, hb_anchor.clone()).await;
+    if let Some(s) = sampler {
+        let _ = s.await;
+    }
 
     if let Some(csv) = results_csv {
         // The scoring layout expects oracle-work/results.csv.
@@ -501,6 +511,52 @@ async fn sample_resources(out_path: PathBuf, stop_at: Instant) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+/// Sample an external process's CPU/RSS from /proc — same resources.jsonl
+/// shape as the oracle's cgroup sampler, so metrics and diff need nothing new.
+async fn sample_proc(pid: u32, out_path: PathBuf, stop_at: Instant) -> Result<()> {
+    let mut out = tokio::fs::File::create(&out_path).await?;
+    let tick_usec = 1_000_000 / 100; // USER_HZ=100 on Linux
+    while Instant::now() < stop_at {
+        sleep(Duration::from_secs(2)).await;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+        let cpu_usec = stat.and_then(|s| {
+            // Fields after the parenthesized comm: utime is field 14,
+            // stime 15 (1-indexed from the start).
+            let rest = s.rsplit_once(national_paren())?.1.trim();
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            let ut: u64 = f.get(11)?.parse().ok()?;
+            let st: u64 = f.get(12)?.parse().ok()?;
+            Some((ut + st) * tick_usec)
+        });
+        let mem_bytes = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmRSS:"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|kb| kb * 1024)
+            });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs_f64();
+        out.write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({"t": now, "cpu_usec": cpu_usec, "mem_bytes": mem_bytes})
+            )
+            .as_bytes(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The ') ' that ends the comm field in /proc/pid/stat.
+fn national_paren() -> &'static str {
+    ") "
 }
 
 async fn teardown(compose: &Path, run_dir: &Path) {

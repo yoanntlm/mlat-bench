@@ -22,6 +22,10 @@ const MIN_OBS: usize = 8;
 const MIN_SPAN_S: f64 = 5.0;
 const WINDOW_S: f64 = 180.0;
 const MAX_OBS: usize = 400;
+/// Refuse conversions whose prediction sigma exceeds this — a poisoned
+/// observation is worse than a missing one (bench: minute-1 and minute-9
+/// tails, seeds 42 and 1337).
+const MAX_PRED_SIGMA_S: f64 = 2e-6;
 
 impl PairModel {
     pub fn push(&mut self, t_from: f64, t_to: f64) {
@@ -36,9 +40,11 @@ impl PairModel {
     }
 
     /// Convert a from-clock reading to the to-clock, if the model is sound.
-    /// Centered least squares: β is within ppm of 1, so subtracting the
-    /// window means keeps the arithmetic in comfortable f64 territory.
-    pub fn convert(&self, t_from: f64) -> Option<f64> {
+    /// Returns the converted time AND the fit's own residual RMS — the honest
+    /// per-pair timing error, which downstream weighting and gating need far
+    /// more than any per-clock-type constant (bench evidence: the est column
+    /// underestimated ~2-3x during sync-noise bursts with constant errors).
+    pub fn convert(&self, t_from: f64) -> Option<(f64, f64)> {
         let n = self.obs.len();
         if n < MIN_OBS {
             return None;
@@ -60,7 +66,29 @@ impl PairModel {
             return None;
         }
         let beta = sxy / sxx;
-        Some(mean_b + beta * (t_from - mean_a))
+        let alpha = mean_b - beta * mean_a;
+        let sigma_fit = (self
+            .obs
+            .iter()
+            .map(|(a, b)| {
+                let e = b - (alpha + beta * a);
+                e * e
+            })
+            .sum::<f64>()
+            / n as f64)
+            .sqrt();
+        // PREDICTION interval, not fit residual: the (t−t̄)²/Sxx term blows
+        // up exactly when the model is young or extrapolating past its
+        // window — the two phases where the bench measured km-scale errors
+        // hiding behind a 24 m fit sigma. Honest sigma lets the covariance
+        // gate and accuracy throttle downstream do their jobs.
+        let da = t_from - mean_a;
+        let infl = (1.0 + 1.0 / n as f64 + da * da / sxx).sqrt();
+        let sigma_pred = sigma_fit * infl;
+        if sigma_pred > MAX_PRED_SIGMA_S {
+            return None; // conversion too uncertain to contribute at all
+        }
+        Some((alpha + beta * t_from, sigma_pred))
     }
 }
 
@@ -76,9 +104,10 @@ mod tests {
             let t = i as f64;
             m.push(t, 0.0005 + t * (1.0 + 10e-6));
         }
-        let got = m.convert(100.0).unwrap();
+        let (got, sigma) = m.convert(100.0).unwrap();
         let want = 0.0005 + 100.0 * (1.0 + 10e-6);
         assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        assert!(sigma < 1e-9, "perfect data must fit tightly: {sigma}");
     }
 
     #[test]

@@ -57,6 +57,10 @@ enum Cmd {
         /// copied into the run dir for scoring.
         #[arg(long)]
         results_csv: Option<std::path::PathBuf>,
+        /// PID of the external server: sampled for CPU/RSS so the report can
+        /// compare resources with the oracle's.
+        #[arg(long)]
+        sample_pid: Option<u32>,
     },
     /// Compare two scored runs' metrics.json side by side.
     Diff {
@@ -103,7 +107,17 @@ async fn main() -> anyhow::Result<()> {
             speed,
             addr,
             results_csv,
-        } => runcmd::replay(&capture, speed, addr.as_deref(), results_csv.as_deref()).await,
+            sample_pid,
+        } => {
+            runcmd::replay(
+                &capture,
+                speed,
+                addr.as_deref(),
+                results_csv.as_deref(),
+                sample_pid,
+            )
+            .await
+        }
         Cmd::Diff { a, b } => scorecmd::diff(&a, &b),
         Cmd::Score { run_dir } => scorecmd::score(&run_dir),
         Cmd::Record {

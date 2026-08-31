@@ -69,25 +69,39 @@ payload, which are fixed at gen time. The oracle itself is not deterministic
 ## The candidate
 
 `crates/mb-server` is a from-scratch Rust MLAT server benched against the
-oracle on identical captures — the comparison the harness exists for. v0 is
-~800 lines: pairwise clock sync (windowed linear fit, star topology to a
-GPS-preferred reference), content-keyed grouping, fixed-altitude Gauss-Newton
-TDOA, hard residual gate. First scored round, same 600 s scenario, 10× replay:
+oracle on identical captures — the comparison the harness exists for. ~1000
+lines: pairwise clock sync (windowed linear fit with honest prediction-
+interval sigmas, star topology to a GPS-preferred reference), timestamp
+clustering before the solve, fixed-altitude weighted Gauss-Newton TDOA with
+covariance gating and the oracle's accuracy-scaled output throttle.
 
-| | oracle | mb-server v0 |
-|---|---|---|
-| results | 1070 | 2017 |
-| p50 error | 27.1 m | **21.8 m** |
-| p90 / p99 | **65.8 / 169 m** | 88.4 / 301 m |
-| ghosts | 0 + 4 gross | 0 + 0 |
-| coverage | 59 % | 81 % |
+Scored on the 600 s smoke scenario at 10× replay, two independent seeds:
 
-Read it honestly: the candidate wins median, rate, and ghost count; the
-oracle's tail (p90/p99) is better — that's where its decade of outlier
-heuristics lives, and closing it is the candidate's roadmap. The bench also
-caught the candidate's first real bug in one iteration: results stamped at
-solve time instead of reception time read as a clean 165 m bias at cruise
-speed.
+| | oracle s42 | mb-server s42 | oracle s1337 | mb-server s1337 |
+|---|---|---|---|---|
+| p50 error | 27.1 m | **18.1 m** | 25.7 m | **18.9 m** |
+| p90 | 65.8 m | **48.1 m** | 62.1 m | **48.0 m** |
+| p99 | 169 m | **123 m** | 190 m | **112 m** |
+| results | 1070 | 1773 | 1145 | 1436 |
+| ghosts (gross) | 4 | 1 | 3 | 0 |
+| coverage | 59 % | 85 % | 62 % | 69 % |
+| CPU (10×) | 7.0 % | **4.1 %** | 13.9 % | **3.9 %** |
+| RSS | 73 MB | **5.8 MB** | 76 MB | **5.9 MB** |
+
+Every improvement was bench-driven, most of them ports of the oracle's own
+accumulated heuristics with the bench as referee: reception-time stamping
+(165 m bias caught in one iteration), covariance error estimates and the
+accuracy-scaled throttle, warm starts, per-measurement weighting, timestamp
+clustering (byte-identical level-flight frames merge distinct transmissions
+— 300 m p99 bursts until clustered, exactly why mutability wrote
+_cluster_timestamps), and prediction-interval sigmas on the pair models
+(young/extrapolating sync models hid km-scale errors behind 24 m fit
+residuals; seed 1337's p99 went 592 m → 112 m).
+
+Honest scope: these numbers are one synthetic scenario family with clean
+Gaussian clocks — no multipath, no broken feeders, no zlib clients, no
+result return. The stress scenarios are where the oracle's remaining battle
+scars should show; that's the next chapter, and the bench is ready for it.
 
 ## Docs
 

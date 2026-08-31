@@ -15,6 +15,19 @@ pub struct ReceiverInfo {
     pub ecef: Ecef,
     pub freq_hz: f64,
     pub gps: bool,
+    /// Expected timing error fed to the weighted solve, seconds (1σ).
+    /// Covers clock jitter plus pair-model slack; per clock type.
+    pub jitter_s: f64,
+}
+
+/// Per-aircraft publication state — the oracle's tail-control heuristics
+/// (mlattrack.py), ported: warm starts, solve backoff, and accuracy-scaled
+/// output rate.
+#[derive(Clone, Copy, Default)]
+struct Track {
+    last_pos: Option<Geodetic>,
+    last_time_scaled: f64,
+    last_attempt_scaled: f64,
 }
 
 struct SyncPoint {
@@ -25,14 +38,11 @@ struct SyncPoint {
 
 struct Group {
     created: Instant,
-    /// Output clock at first reception — results are stamped with WHEN THE
-    /// SIGNAL ARRIVED, not when we got around to solving it. Stamping at
-    /// solve time cost 165 m of apparent error at cruise speed on the first
-    /// bench run (group window + sweep lag × 450 kts); the bench caught it.
-    created_scaled: f64,
     icao: Icao,
-    /// (receiver idx, arrival time in that receiver's clock, seconds)
-    entries: Vec<(usize, f64)>,
+    /// (receiver idx, arrival time in that receiver's clock s, output clock
+    /// at insertion). The insertion stamp rides along because one content key
+    /// can hold SEVERAL transmissions — see solve_group.
+    entries: Vec<(usize, f64, f64)>,
 }
 
 pub struct State {
@@ -42,6 +52,7 @@ pub struct State {
     syncpoints: HashMap<(String, String), SyncPoint>,
     groups: HashMap<String, Group>,
     alts_ft: HashMap<Icao, i32>,
+    tracks: HashMap<Icao, Track>,
     csv: std::io::BufWriter<std::fs::File>,
     // Scaled output clock (matches the oracle's faked-clock behavior at
     // accelerated replay; see the harness's scoring anchor).
@@ -62,6 +73,7 @@ impl State {
             syncpoints: HashMap::new(),
             groups: HashMap::new(),
             alts_ft: HashMap::new(),
+            tracks: HashMap::new(),
             csv: std::io::BufWriter::new(std::fs::File::create(csv_path)?),
             t0_real: Instant::now(),
             t0_unix: std::time::SystemTime::now()
@@ -188,17 +200,16 @@ impl State {
             _ => return,
         };
         let t_s = t_counts / self.receivers[rx].freq_hz;
-        let created_scaled = self.scaled_now();
+        let at_scaled = self.scaled_now();
         let g = self
             .groups
             .entry(m_hex.to_string())
             .or_insert_with(|| Group {
                 created: Instant::now(),
-                created_scaled,
                 icao,
                 entries: Vec::new(),
             });
-        g.entries.push((rx, t_s));
+        g.entries.push((rx, t_s, at_scaled));
     }
 
     /// Sweep: solve groups older than the window, expire stale sync points.
@@ -219,65 +230,139 @@ impl State {
         }
     }
 
+    /// Publication gates, from the oracle's accumulated behavior:
+    /// solve backoff per aircraft, covariance error ceiling, and the
+    /// accuracy-scaled rate rule `elapsed/20 < err/max_err → skip`.
+    const RESOLVE_BACKOFF_S: f64 = 0.4; // oracle: 0.7; we keep more rate
+    const MAX_ERR_M: f64 = 10_000.0;
+
     fn solve_group(&mut self, g: &Group) {
         let Some(reference) = self.reference else {
             return;
         };
-        // One arrival per receiver (first wins), converted to reference time.
-        let mut seen = std::collections::HashSet::new();
-        let mut obs = Vec::new();
-        let mut users = Vec::new();
-        for &(rx, t_s) in &g.entries {
-            if !seen.insert(rx) {
-                continue;
-            }
+        // A level-flight aircraft's DF4/DF11 frames are byte-identical across
+        // transmissions, so one content key collects SEVERAL distinct
+        // broadcasts within the window; with packet loss, receivers'
+        // "first" entries can belong to different transmissions. Solving such
+        // a mix blends events ~0.25 s apart and reads as a ~1.5 s × speed
+        // position bias (bench: 300 m bursts at p99). The cure is the
+        // oracle's _cluster_timestamps idea: convert to the common timebase
+        // FIRST, then split into physically consistent clusters — receivers
+        // can only disagree by the network's light-crossing time.
+        const CLUSTER_SPAN_S: f64 = 2.5e-3; // ~500 km network diameter / c
+
+        let mut conv: Vec<(usize, f64, f64, f64)> = Vec::new(); // (rx, t_ref, sigma, at_scaled)
+        for &(rx, t_s, at_scaled) in &g.entries {
             let t_ref = if rx == reference {
-                Some(t_s)
+                Some((t_s, self.receivers[rx].jitter_s))
             } else {
                 self.pairs
                     .get(&(rx, reference))
                     .and_then(|p| p.convert(t_s))
             };
-            if let Some(t) = t_ref {
-                obs.push(Observation {
-                    rx: self.receivers[rx].ecef,
-                    t_s: t,
-                });
-                users.push(self.receivers[rx].user.clone());
+            if let Some((t, sigma)) = t_ref {
+                conv.push((rx, t, sigma.max(self.receivers[rx].jitter_s), at_scaled));
             }
+        }
+        if conv.len() < 4 {
+            return;
+        }
+        conv.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        // Greedy consistent clusters, each solved independently (each is a
+        // distinct physical transmission).
+        let mut i = 0;
+        while i < conv.len() {
+            let start_t = conv[i].1;
+            let mut j = i;
+            while j < conv.len() && conv[j].1 - start_t <= CLUSTER_SPAN_S {
+                j += 1;
+            }
+            self.solve_cluster(g.icao, &conv[i..j]);
+            i = j;
+        }
+    }
+
+    fn solve_cluster(&mut self, icao: Icao, cluster: &[(usize, f64, f64, f64)]) {
+        // One observation per receiver: earliest (direct path; any duplicate
+        // within a cluster would be multipath in the real world).
+        let mut seen = std::collections::HashSet::new();
+        let mut obs = Vec::new();
+        let mut users = Vec::new();
+        let mut stamp = f64::INFINITY;
+        for &(rx, t, sigma, at_scaled) in cluster {
+            if !seen.insert(rx) {
+                continue;
+            }
+            obs.push(Observation {
+                rx: self.receivers[rx].ecef,
+                t_s: t,
+                err_s: sigma,
+            });
+            users.push(self.receivers[rx].user.clone());
+            stamp = stamp.min(at_scaled);
         }
         if obs.len() < 4 {
             return;
         }
-        let Some(&alt_ft) = self.alts_ft.get(&g.icao) else {
+        let now_scaled = self.scaled_now();
+        let track = *self.tracks.entry(icao).or_default();
+        if now_scaled - track.last_attempt_scaled < Self::RESOLVE_BACKOFF_S {
+            return;
+        }
+        let Some(&alt_ft) = self.alts_ft.get(&icao) else {
             return; // no altitude yet (DF11-only so far) — wait for a DF4
         };
         let alt_m = alt_ft as f64 * 0.3048;
-        // Init at the receivers' centroid — always inside the polygon.
-        let n = obs.len() as f64;
-        let init = Geodetic {
-            lat_deg: users
-                .iter()
-                .filter_map(|u| self.receivers.iter().find(|r| &r.user == u))
-                .map(|r| r.geo.lat_deg)
-                .sum::<f64>()
-                / n,
-            lon_deg: users
-                .iter()
-                .filter_map(|u| self.receivers.iter().find(|r| &r.user == u))
-                .map(|r| r.geo.lon_deg)
-                .sum::<f64>()
-                / n,
-            alt_m,
+        self.tracks
+            .get_mut(&icao)
+            .expect("entry above")
+            .last_attempt_scaled = now_scaled;
+        // Warm start from the last accepted fix when fresh (< 60 s), the
+        // oracle's convergence aid; else the receivers' centroid.
+        let init = match track.last_pos {
+            Some(p) if now_scaled - track.last_time_scaled < 60.0 => Geodetic { alt_m, ..p },
+            _ => {
+                let n = obs.len() as f64;
+                Geodetic {
+                    lat_deg: users
+                        .iter()
+                        .filter_map(|u| self.receivers.iter().find(|r| &r.user == u))
+                        .map(|r| r.geo.lat_deg)
+                        .sum::<f64>()
+                        / n,
+                    lon_deg: users
+                        .iter()
+                        .filter_map(|u| self.receivers.iter().find(|r| &r.user == u))
+                        .map(|r| r.geo.lon_deg)
+                        .sum::<f64>()
+                        / n,
+                    alt_m,
+                }
+            }
         };
-        match solve::solve(&obs, alt_m, init) {
+        match solve::solve_robust(&obs, alt_m, init) {
             Some(sol) => {
+                // Covariance error ceiling + accuracy-scaled output rate:
+                // bad fixes only pass after proportionally more silence.
+                if sol.err_est_m > Self::MAX_ERR_M {
+                    self.stats_rejected += 1;
+                    return;
+                }
+                let elapsed = now_scaled - track.last_time_scaled;
+                if track.last_pos.is_some() && elapsed / 20.0 < sol.err_est_m / Self::MAX_ERR_M {
+                    self.stats_rejected += 1;
+                    return;
+                }
                 self.stats_solved += 1;
-                let err_m = sol.rms_s * C_MPS;
+                let t = self.tracks.get_mut(&icao).expect("entry above");
+                t.last_pos = Some(sol.pos);
+                t.last_time_scaled = now_scaled;
+                let err_m = sol.err_est_m;
                 let row = format!(
                     "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",
-                    g.created_scaled,
-                    g.icao.to_hex(),
+                    stamp,
+                    icao.to_hex(),
                     sol.pos.lat_deg,
                     sol.pos.lon_deg,
                     alt_ft,

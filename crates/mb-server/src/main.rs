@@ -139,12 +139,17 @@ async fn handle_client(
         lon_deg: lon,
         alt_m: alt,
     };
+    let gps = clock_type.starts_with("radarcape_gps");
     let rx = state.lock().unwrap().add_receiver(ReceiverInfo {
         user: user.clone(),
         ecef: geo.to_ecef(),
         geo,
         freq_hz,
-        gps: clock_type.starts_with("radarcape_gps"),
+        gps,
+        // Effective timing error: clock jitter + pair-model slack. GPS
+        // clocks convert near-losslessly; free-running clocks carry the
+        // sync model's noise on top of their own.
+        jitter_s: if gps { 30e-9 } else { 150e-9 },
     });
     wr.write_all(
         b"{\"compress\":\"none\",\"reconnect_in\":300,\"selective_traffic\":false,\
