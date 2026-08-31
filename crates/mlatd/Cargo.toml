@@ -1,13 +1,13 @@
 [package]
-name = "mb-server"
-description = "Candidate MLAT server: speaks the mlat-client protocol, benched by mlat-bench against the oracle"
+name = "mlatd"
+description = "MLAT server for the mlat-client protocol — Mode S multilateration, world scale in one binary"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "mb-server"
+name = "mlatd"
 path = "src/main.rs"
 
 [dependencies]

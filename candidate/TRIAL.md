@@ -8,7 +8,7 @@ the tailnet. Everything below is one command per host once it's back.
 ```sh
 git clone git@github.com:yoanntlm/mlat-bench && cd mlat-bench/candidate
 MB_BIND=100.114.32.128 docker compose up -d --build
-docker logs -f mb-server        # expect: listening on 0.0.0.0:31090
+docker logs -f mlatd        # expect: listening on 0.0.0.0:31090
 ```
 
 `MB_BIND` pins the mlat port to the tailnet interface — never the public one.
@@ -28,7 +28,7 @@ keep receiving everything, same as always.
 
 ## What success looks like (first hour)
 
-- mb-server log: `<station> connected (dump1090, zlib2)` and rate_report-driven
+- mlatd log: `<station> connected (dump1090, zlib2)` and rate_report-driven
   `start_sending` — the real client sends only after being asked.
 - `work/sync.json` appears (one receiver: peers empty — sync needs two).
 - No positions with one receiver, by physics. The trial proves protocol

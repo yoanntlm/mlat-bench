@@ -422,20 +422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mb-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "hex",
- "mb-core",
- "mb-modes",
- "mb-proto",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "mb-sim"
 version = "0.1.0"
 dependencies = [
@@ -496,6 +482,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mlatd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "mb-core",
+ "mb-modes",
+ "mb-proto",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

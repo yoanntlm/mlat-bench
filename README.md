@@ -68,7 +68,7 @@ payload, which are fixed at gen time. The oracle itself is not deterministic
 
 ## The candidate
 
-`crates/mb-server` is a from-scratch Rust MLAT server benched against the
+`crates/mlatd` is a from-scratch Rust MLAT server benched against the
 oracle on identical captures — the comparison the harness exists for. ~1000
 lines: pairwise clock sync (windowed linear fit with honest prediction-
 interval sigmas, star topology to a GPS-preferred reference), timestamp
@@ -77,7 +77,7 @@ covariance gating and the oracle's accuracy-scaled output throttle.
 
 Scored on the 600 s smoke scenario at 10× replay, two independent seeds:
 
-| | oracle s42 | mb-server s42 | oracle s1337 | mb-server s1337 |
+| | oracle s42 | mlatd s42 | oracle s1337 | mlatd s1337 |
 |---|---|---|---|---|
 | p50 error | 27.1 m | **18.1 m** | 25.7 m | **18.9 m** |
 | p90 | 65.8 m | **48.1 m** | 62.1 m | **48.0 m** |
@@ -106,7 +106,7 @@ The lab table above is the friendly world. Two harder ones, same protocol:
 spikes, a receiver with wrong reported coordinates, out-of-spec wandering
 and jumping clocks, 4 ms network jitter, heavy loss):
 
-| | oracle | mb-server |
+| | oracle | mlatd |
 |---|---|---|
 | p50 / p90 / p99 | **80** / 301 / 919 m | 105 / **293** / **852** m |
 | ghosts (gross) | 5 | **0** |
@@ -119,7 +119,7 @@ resources. Closing that median gap is the open accuracy frontier.
 **Metro scale** (`scenarios/metro-scale.toml`: 60 receivers, 60 aircraft,
 150 km radius, both servers at a gentle 2× replay):
 
-| | oracle | mb-server |
+| | oracle | mlatd |
 |---|---|---|
 | results | 637 | **6143** |
 | coverage | 4 % | **47 %** |
@@ -168,7 +168,7 @@ Two bridges out of the lab:
 
 - **`beast-serve`** replays any capture client's receptions as a Mode-S Beast
   stream — food for the GENUINE wiedehopf mlat-client, no SDR required. Five
-  real clients end-to-end against mb-server: handshake, selective traffic,
+  real clients end-to-end against mlatd: handshake, selective traffic,
   sync pairing and rate reports all theirs, **p50 31 m / p90 77 m / p99
   144 m** against capture truth. (Finding that paid for the exercise: a real
   client withholds ALL traffic until the server start_sendings it —
@@ -184,7 +184,7 @@ Two bridges out of the lab:
 
 LocaRDS slice, both servers, identical input, 2× replay:
 
-| 316 real sensors · 455 holdout aircraft · 10 min | oracle | mb-server |
+| 316 real sensors · 455 holdout aircraft · 10 min | oracle | mlatd |
 |---|---|---|
 | positions produced | 28 | **35,639** |
 | p50 error | 98.8 m | **93.7 m** |
@@ -201,7 +201,7 @@ crash-loops; docs/protocol-notes.md, one-line guard now patched into the
 oracle image, issue drafted upstream). With the guard in place, the FAIR
 real-data comparison on the identical capture:
 
-| patched oracle vs mb-server | oracle | mb-server |
+| patched oracle vs mlatd | oracle | mlatd |
 |---|---|---|
 | scoreable positions | 6,568 | **35,769** |
 | p50 / p90 / p99 | 135 / 504 / 2,069 m | **94 / 298 / 901 m** |

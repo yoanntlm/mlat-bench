@@ -1,4 +1,4 @@
-//! mb-server — a candidate MLAT server, benched by mlat-bench.
+//! mlatd — a candidate MLAT server, benched by mlat-bench.
 //!
 //! v0 scope, on purpose: mlat-client protocol over `compress: none`,
 //! pairwise clock sync (windowed linear fit, star topology to one reference
@@ -8,7 +8,7 @@
 //! deliberate gap the bench will price.
 //!
 //! Bench it:
-//!   cargo run -p mb-server -- --write-csv /tmp/cand.csv --time-scale 10 --group-window-ms 90
+//!   cargo run -p mlatd -- --write-csv /tmp/cand.csv --time-scale 10 --group-window-ms 90
 //!   cargo run -p mlat-bench -- replay <capture> --speed 10 \
 //!       --addr 127.0.0.1:40160 --results-csv /tmp/cand.csv
 
@@ -30,13 +30,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "mb-server", version, about)]
+#[command(name = "mlatd", version, about)]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1:40160")]
     listen: String,
     /// Oracle-format results CSV output (the bench's scoring input).
+    /// Optional in production: results also flow to connected clients
+    /// (return_results) and the SBS listener.
     #[arg(long)]
-    write_csv: std::path::PathBuf,
+    write_csv: Option<std::path::PathBuf>,
     /// Message-grouping window, milliseconds of REAL time. At an accelerated
     /// replay divide the usual 900 by the speed factor.
     #[arg(long, default_value_t = 900)]
@@ -116,7 +118,10 @@ async fn main() -> Result<()> {
     {
         use std::io::Write;
         let publish = publish.clone();
-        let mut csv = std::io::BufWriter::new(std::fs::File::create(&cli.write_csv)?);
+        let mut csv = match &cli.write_csv {
+            Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+            None => None,
+        };
         let mut filtered = match &cli.write_filtered_csv {
             Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
             None => None,
@@ -150,8 +155,10 @@ async fn main() -> Result<()> {
                                 recent.remove(&k);
                             }
                         }
-                        let _ = csv.write_all(row.csv_line.as_bytes());
-                        let _ = csv.flush();
+                        if let Some(w) = csv.as_mut() {
+                            let _ = w.write_all(row.csv_line.as_bytes());
+                            let _ = w.flush();
+                        }
                         if let (Some(w), Some(l)) = (filtered.as_mut(), &row.filtered_line) {
                             let _ = w.write_all(l.as_bytes());
                             let _ = w.flush();
@@ -181,7 +188,7 @@ async fn main() -> Result<()> {
         }));
     }
     let router = Arc::new(Router::new(handles, cli.shard_cell_deg, cli.shard_cap));
-    println!("mb-server: {n_shards} shards");
+    println!("mlatd: {n_shards} shards");
 
     // Stats line every 10 s, aggregated across shards.
     {
@@ -202,7 +209,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                println!("mb-server: rx={rx_n} sync_obs={sync_o} solved={solved} rejected={rej}");
+                println!("mlatd: rx={rx_n} sync_obs={sync_o} solved={solved} rejected={rej}");
             }
         });
     }
@@ -212,10 +219,10 @@ async fn main() -> Result<()> {
         let publish = publish.clone();
         tokio::spawn(async move {
             let Ok(l) = TcpListener::bind(&addr).await else {
-                eprintln!("mb-server: cannot bind SBS listener {addr}");
+                eprintln!("mlatd: cannot bind SBS listener {addr}");
                 return;
             };
-            println!("mb-server: SBS output on {addr}");
+            println!("mlatd: SBS output on {addr}");
             loop {
                 let Ok((mut sock, _)) = l.accept().await else {
                     break;
@@ -259,7 +266,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
-    println!("mb-server: listening on {listen}");
+    println!("mlatd: listening on {listen}");
     let hb_real = Duration::from_secs_f64(30.0 / cli.time_scale);
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -277,7 +284,7 @@ async fn main() -> Result<()> {
             )
             .await
             {
-                eprintln!("mb-server: {peer}: {e:#}");
+                eprintln!("mlatd: {peer}: {e:#}");
             }
         });
     }
@@ -379,10 +386,10 @@ async fn handle_client(
     let reply = format!(
         "{{\"compress\":\"{negotiated}\",\"reconnect_in\":300,\"selective_traffic\":true,\
          \"heartbeat\":true,\"return_results\":{wants_results},\"rate_reports\":true,\
-         \"motd\":\"mlat-bench candidate mb-server\"}}\n"
+         \"motd\":\"mlat-bench candidate mlatd\"}}\n"
     );
     wr.write_all(reply.as_bytes()).await?;
-    println!("mb-server: {user} connected ({clock_type}, {negotiated})");
+    println!("mlatd: {user} connected ({clock_type}, {negotiated})");
 
     // Single writer task: heartbeats and (if subscribed) result messages
     // funnel through one mpsc so the socket has exactly one writer.
@@ -467,7 +474,7 @@ async fn handle_client(
     }
     drop(tx_line);
     let _ = writer.await;
-    println!("mb-server: {user} disconnected");
+    println!("mlatd: {user} disconnected");
     Ok(())
 }
 

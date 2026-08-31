@@ -7,7 +7,7 @@ members = [
     "crates/mb-sim",
     "crates/mb-capture",
     "crates/mb-metrics",
-    "crates/mb-server",
+    "crates/mlatd",
     "crates/mlat-bench",
 ]
 

@@ -11,12 +11,12 @@
 # same doctrine as every fp stack: a tunnel or the tailnet is the only door.
 
 services:
-  mb-server:
+  mlatd:
     build:
       context: ..
       dockerfile: candidate/Dockerfile
-    image: mb-server
-    container_name: mb-server
+    image: mlatd
+    container_name: mlatd
     restart: unless-stopped
     command:
       - --listen=0.0.0.0:31090
