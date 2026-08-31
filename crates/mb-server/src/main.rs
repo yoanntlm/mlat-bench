@@ -60,6 +60,13 @@ struct Cli {
     /// an independent geographic slice; see shard.rs.
     #[arg(long, default_value_t = 0)]
     shards: usize,
+    /// Geographic cell size for shard assignment, degrees. 5 suits sparse
+    /// continental networks; 2 suits dense metros under heavy load.
+    #[arg(long, default_value_t = 5.0)]
+    shard_cell_deg: f64,
+    /// Receiver capacity per shard before region growth spills over.
+    #[arg(long, default_value_t = 64)]
+    shard_cap: usize,
     /// Alpha-beta-smoothed results, same CSV format — the drop-in analogue
     /// of the oracle's Kalman output. Score raw vs filtered to see if it
     /// earns its place.
@@ -173,7 +180,7 @@ async fn main() -> Result<()> {
             receivers: std::sync::atomic::AtomicUsize::new(0),
         }));
     }
-    let router = Arc::new(Router::new(handles));
+    let router = Arc::new(Router::new(handles, cli.shard_cell_deg, cli.shard_cap));
     println!("mb-server: {n_shards} shards");
 
     // Stats line every 10 s, aggregated across shards.

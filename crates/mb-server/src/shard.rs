@@ -72,31 +72,92 @@ pub struct ShardHandle {
 
 pub struct Router {
     shards: Vec<Arc<ShardHandle>>,
-    /// 5°×5° cell → shard index, sticky from first sight.
+    /// Geographic cell size (degrees) and per-shard receiver capacity —
+    /// deployment tunables with a measured tradeoff (see shard bench notes):
+    /// 5°/64 suits sparse-continental real networks (LocaRDS: full
+    /// recovery); dense synthetic metros under extreme load prefer 2° or
+    /// plain least-loaded. No constant serves every geometry.
+    cell_deg: f64,
+    cap: usize,
+    /// 2°×2° cell → shard index, sticky from first sight (5° quantized dense
+    /// metros into ~9 blocks and starved the partition of granularity).
     cells: std::sync::Mutex<HashMap<(i16, i16), usize>>,
 }
 
 impl Router {
-    pub fn new(shards: Vec<Arc<ShardHandle>>) -> Self {
+    pub fn new(shards: Vec<Arc<ShardHandle>>, cell_deg: f64, cap: usize) -> Self {
         Router {
             shards,
+            cell_deg,
+            cap,
             cells: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// Shard for a receiver at (lat, lon): its cell's shard, or — for a new
-    /// cell — the currently least-loaded shard, remembered forever.
+    /// Shard for a receiver at (lat, lon): its cell's shard, remembered
+    /// forever. A NEW cell joins the shard owning most of its 8 neighbors —
+    /// geography first, load second. Pure least-loaded assignment scattered
+    /// adjacent European cells across 20 shards and sliced real co-hearing
+    /// neighborhoods apart (LocaRDS: results −32%, coverage 27→18%);
+    /// neighbor affinity keeps regions contiguous, so parallelism spreads
+    /// only where the map actually spreads.
     pub fn shard_for(&self, lat: f64, lon: f64) -> (usize, Arc<ShardHandle>) {
-        let cell = ((lat / 5.0).floor() as i16, (lon / 5.0).floor() as i16);
+        let cell = (
+            (lat / self.cell_deg).floor() as i16,
+            (lon / self.cell_deg).floor() as i16,
+        );
         let mut cells = self.cells.lock().unwrap();
-        let idx = *cells.entry(cell).or_insert_with(|| {
-            self.shards
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, s)| s.receivers.load(std::sync::atomic::Ordering::Relaxed))
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        });
+        let idx = match cells.get(&cell) {
+            Some(&i) => i,
+            None => {
+                // Region growing with a capacity cap: prefer the neighbor
+                // shard, but once a shard holds ~CAP receivers the frontier
+                // starts a new one (itself contiguous). Pure affinity fused
+                // dense w800 into one shard (coverage 66→45% at 4×); pure
+                // least-loaded shredded real Europe (LocaRDS −32%).
+                let cap = self.cap;
+                let mut votes: HashMap<usize, usize> = HashMap::new();
+                for dy in -1i16..=1 {
+                    for dx in -1i16..=1 {
+                        if let Some(&n) = cells.get(&(cell.0 + dy, cell.1 + dx)) {
+                            if self.shards[n]
+                                .receivers
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                < cap
+                            {
+                                *votes.entry(n).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+                let i = votes
+                    .into_iter()
+                    .max_by_key(|&(shard, n)| {
+                        // Most neighboring cells wins; break ties toward the
+                        // less-loaded shard.
+                        (
+                            n,
+                            usize::MAX
+                                - self.shards[shard]
+                                    .receivers
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    })
+                    .map(|(shard, _)| shard)
+                    .unwrap_or_else(|| {
+                        self.shards
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, s)| {
+                                s.receivers.load(std::sync::atomic::Ordering::Relaxed)
+                            })
+                            .map(|(i, _)| i)
+                            .unwrap_or(0)
+                    });
+                cells.insert(cell, i);
+                i
+            }
+        };
         (idx, self.shards[idx].clone())
     }
 

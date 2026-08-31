@@ -142,6 +142,26 @@ Honest scope: all synthetic. No real RF, no real feeder zoo, no result
 return to clients, no reconnect/blacklist plumbing. Real-data import
 (LocaRDS; live recordings via `record`) is the next chapter.
 
+## One binary, world scale
+
+The single-mutex design measured its cliff at ~800 dense receivers; the
+server is now lock-free geographic shards (each owns its state in a task,
+message-passing only) with O(1) sufficient-statistic clock models. Measured:
+the same 800-receiver world that collapsed the old build at 2× runs at 4×
+time compression — 3,200-receiver-equivalent sustained load — at unchanged
+accuracy (p50 48 vs 47 m), ~3.7 cores, 72 MB RAM. Real-data regression:
+none (35.2k results, p50 96 m on LocaRDS with shipping defaults, within a
+few % of the pre-shard best — the residue is the documented boundary cost
+of parallelism; `--shard-cell-deg` / `--shard-cap` tune the partition to
+deployment geometry, with the measured tradeoff in the commit history).
+Extrapolating measured per-message cost, ~10k global feeders fits one
+commodity multi-core box — extrapolation labeled as such until measured.
+
+Getting there was a three-bug forensic chain worth keeping: divergent
+scaled-clock epochs, queue-lag timestamping, and finally the bench's own
+result-echo storm corrupting its measurement anchor while the server's
+solutions sat at p50 30 m underneath. The bench had to debug the bench.
+
 ## Real clients, real data
 
 Two bridges out of the lab:
