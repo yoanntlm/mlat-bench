@@ -130,8 +130,8 @@ mod tests {
     #[test]
     fn nl_reference_values() {
         assert_eq!(nl(0.0), 59);
-        assert_eq!(nl(52.25720214843750), 36);
-        assert_eq!(nl(-52.25720214843750), 36);
+        assert_eq!(nl(52.2572021484375), 36);
+        assert_eq!(nl(-52.2572021484375), 36);
         assert_eq!(nl(87.5), 1);
         assert_eq!(nl(10.0), 59);
         // A transition-table spot check: NL drops to 58 just above 10.47047130°.
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn golden_global_decode() {
         let (lat, lon) = global_decode_airborne(EVEN, ODD, false).unwrap();
-        assert!((lat - 52.25720214843750).abs() < 1e-9, "lat {lat}");
+        assert!((lat - 52.2572021484375).abs() < 1e-9, "lat {lat}");
         assert!((lon - 3.91937255859375).abs() < 1e-9, "lon {lon}");
     }
 
@@ -149,7 +149,7 @@ mod tests {
     fn golden_encode_even() {
         // Encoding the exact even-decoded position must reproduce the even
         // message's CPR values bit-for-bit.
-        let (yz, xz) = encode_airborne(52.25720214843750, 3.91937255859375, false);
+        let (yz, xz) = encode_airborne(52.2572021484375, 3.91937255859375, false);
         assert_eq!((yz, xz), EVEN);
     }
 
