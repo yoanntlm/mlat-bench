@@ -142,6 +142,24 @@ Honest scope: all synthetic. No real RF, no real feeder zoo, no result
 return to clients, no reconnect/blacklist plumbing. Real-data import
 (LocaRDS; live recordings via `record`) is the next chapter.
 
+## Real clients, real data
+
+Two bridges out of the lab:
+
+- **`beast-serve`** replays any capture client's receptions as a Mode-S Beast
+  stream — food for the GENUINE wiedehopf mlat-client, no SDR required. Five
+  real clients end-to-end against mb-server: handshake, selective traffic,
+  sync pairing and rate reports all theirs, **p50 31 m / p90 77 m / p99
+  144 m** against capture truth. (Finding that paid for the exercise: a real
+  client withholds ALL traffic until the server start_sendings it —
+  selective traffic is the request channel, not an optimization.)
+- **`import-locards`** turns a LocaRDS set (real OpenSky receivers,
+  CC BY-SA, published truth) into a capture: real sensor geometry and raw
+  per-sensor nanosecond timestamps — genuine crowdsourced clock behavior —
+  with frames re-encoded from the row's truth, and 25 % of aircraft held
+  out as DF4-only targets the servers must locate. One 10-minute slice:
+  1.09 M transmissions, 316 active sensors, 455 holdout aircraft.
+
 ## Docs
 
 - `docs/protocol-notes.md` — verified wire-protocol facts, with dates
