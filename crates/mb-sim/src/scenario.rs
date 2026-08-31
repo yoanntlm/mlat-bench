@@ -77,8 +77,8 @@ pub struct ReceiverSpec {
     /// Range cap in km on top of the radio horizon (antenna quality proxy).
     #[serde(default)]
     pub max_range_km: Option<f64>,
-    /// Error in the RECEIVER'S REPORTED position (handshake) vs its true
-    /// antenna location, meters — people mistype coordinates. Drawn as a
+    /// Error in the receiver's reported (handshake) position vs its true
+    /// antenna location, meters; operators mistype coordinates. Drawn as a
     /// fixed offset in a seeded direction at gen time.
     #[serde(default)]
     pub reported_pos_error_m: f64,

@@ -28,7 +28,7 @@ enum BroadcastKind {
 }
 
 /// Per-second geometric audibility: which receivers can hear this aircraft
-/// (horizon + range cap; loss NOT applied — this is the "theoretically
+/// (horizon + range cap; loss not applied — this is the "theoretically
 /// trackable" denominator for coverage metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudibilityRow {
@@ -105,9 +105,9 @@ pub fn generate(sc: &Scenario) -> Result<GeneratedCapture, String> {
             });
         }
 
-        // The "liar": a fixed seeded offset applied to BROADCAST positions
-        // only — truth and physics stay honest, the aircraft just reports
-        // wrong coordinates (GPS-degraded / spoofed navigation).
+        // False navigation: a fixed seeded offset applied to broadcast
+        // positions only. Truth and propagation stay correct; the aircraft
+        // reports wrong coordinates (degraded or spoofed navigation).
         let nav_off = if ac.nav_error_m > 0.0 {
             let th: f64 = rng.gen_range(0.0..std::f64::consts::TAU);
             (
@@ -312,7 +312,8 @@ fn build_client(
     let (mut message_count, mut sync_count, mut mlat_count) = (0u64, 0u64, 0u64);
 
     // mlat-client announces its input right after connecting; the server
-    // resets our (empty) clock state — harmless and faithful.
+    // then resets the (empty) clock state. Harmless, and matches the real
+    // client.
     lines.push((0.1, ClientMsg::InputConnected("connected".into()).to_line()));
     message_count += 1;
 

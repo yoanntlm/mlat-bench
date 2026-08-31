@@ -145,8 +145,8 @@ impl ClockModel {
     }
 }
 
-/// Box-Muller from two uniform draws — keeps us off rand_distr for one
-/// gaussian.
+/// Box-Muller from two uniform draws; avoids a rand_distr dependency for
+/// one gaussian.
 fn gaussian(rng: &mut ChaCha12Rng) -> f64 {
     let u1: f64 = rng.gen_range(f64::EPSILON..1.0);
     let u2: f64 = rng.gen_range(0.0..1.0);

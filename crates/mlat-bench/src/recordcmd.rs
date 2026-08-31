@@ -111,7 +111,7 @@ async fn tap(
             .unwrap_or("unknown")
             .into(),
         // Best effort: the server's *choice* isn't visible in the client line;
-        // record the first offer, which is what our own clients pin.
+        // record the first offer; generated clients pin one mode each.
         compress: hs
             .get("compress")
             .and_then(|v| v.as_array())

@@ -19,7 +19,7 @@ pub const MIN_RX: usize = 4;
 
 /// One row of the oracle's --write-csv output.
 /// Columns (mlat/output.py): t, address, callsign, squawk, lat, lon, alt,
-/// err, n, d, receivers, dof, vrate (+ Kalman extension we ignore for now).
+/// err, n, d, receivers, dof, vrate (the Kalman extension is not scored).
 #[derive(Debug, Clone)]
 pub struct CsvRow {
     pub t_wall: f64,

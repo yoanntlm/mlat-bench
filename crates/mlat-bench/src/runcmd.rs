@@ -421,13 +421,13 @@ async fn feed_client(
                 Ok(ServerMsg::Heartbeat {
                     server_time: Some(st),
                 }) => {
-                    // Anchor with the LEAST read-side lag: our read delay
-                    // enters scoring multiplied by the speed factor (audit:
-                    // first-heartbeat anchoring during an 800-connection
-                    // startup storm skewed a 4x world run by a uniform
-                    // 10.3 s — the server was fine, the measuring stick
-                    // wasn't). Maximizing st − speed·now picks the beat we
-                    // read closest to its send instant.
+                    // Anchor with the least read-side lag: read delay
+                    // enters scoring multiplied by the speed factor.
+                    // First-heartbeat anchoring during an 800-connection
+                    // startup storm skewed a 4× run by a uniform 10.3 s;
+                    // the server was correct, the anchor was not.
+                    // Maximizing st − speed·now picks the heartbeat read
+                    // closest to its send instant.
                     let mut a = hb_anchor.lock().unwrap();
                     let better = match *a {
                         None => true,
