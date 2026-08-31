@@ -183,9 +183,14 @@ and replay must survive the oracle's idle-client reaper like a real network
 survives feeder churn. Self-truth held its calibration on real data too:
 it reports p50 126 m where truth measures 94–101 m.
 
-Open frontier, stated plainly: the real-world p99 (~1 km) and the 0.15 %
+Open frontier, stated plainly: the real-world p99 (~1 km) and the ~0.15 %
 ghost floor — diffuse geometry events, not sensor-attributable (adaptive
 receiver quarantine exists and benched neutral on this slice).
+
+Durability, hour scale: a full 3600 s of the same feed (2× replay) produced
+202,903 positions at p50 104 m with the ghost rate stable at 0.13 %, RSS
+capped at 70 MB and CPU ≤ 29 % over 908 samples — no leak, no sync decay
+from first minute to last. `tools/fetch_locards.sh` re-fetches the dataset.
 
 ## Docs
 
