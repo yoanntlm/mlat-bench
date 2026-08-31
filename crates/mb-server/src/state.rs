@@ -235,6 +235,12 @@ impl State {
     /// accuracy-scaled rate rule `elapsed/20 < err/max_err → skip`.
     const RESOLVE_BACKOFF_S: f64 = 0.4; // oracle: 0.7; we keep more rate
     const MAX_ERR_M: f64 = 10_000.0;
+    /// Throttle scale. The oracle throttles with err/10 km — but its error
+    /// estimates run ~9× real (bench, lab scenario), so its EFFECTIVE
+    /// strictness is ~err_true/1.1 km. Our estimates are calibrated, so we
+    /// throttle against a matching honest scale rather than copying the
+    /// constant.
+    const THROTTLE_SCALE_M: f64 = 1_500.0;
 
     fn solve_group(&mut self, g: &Group) {
         let Some(reference) = self.reference else {
@@ -350,7 +356,9 @@ impl State {
                     return;
                 }
                 let elapsed = now_scaled - track.last_time_scaled;
-                if track.last_pos.is_some() && elapsed / 20.0 < sol.err_est_m / Self::MAX_ERR_M {
+                if track.last_pos.is_some()
+                    && elapsed / 20.0 < sol.err_est_m / Self::THROTTLE_SCALE_M
+                {
                     self.stats_rejected += 1;
                     return;
                 }
