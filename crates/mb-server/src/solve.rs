@@ -26,7 +26,9 @@ pub struct Solution {
     /// Kept for logging/tests; not part of the CSV contract.
     #[allow(dead_code)]
     pub iterations: u32,
-    /// Solved transmit time in the common timebase.
+    /// Solved transmit time in the common timebase (not yet consumed; the
+    /// track layer will want it).
+    #[allow(dead_code)]
     pub t_tx: f64,
     /// Per-observation UNWEIGHTED residuals (predicted − measured, seconds),
     /// same order as the input slice — food for per-receiver bias learning.
