@@ -1,8 +1,7 @@
 # MBC capture format, version 1
 
 Status: **frozen 2026-08-31.** Changes require a version bump and a reader
-that still accepts v1 — captures are long-lived artifacts; a benchmark whose
-old inputs stop loading is worthless.
+that still accepts v1; captures are long-lived artifacts.
 
 ## Layout
 
@@ -18,7 +17,7 @@ capture/
 ```
 
 `truth`/`audibility` are absent in real recordings — a capture without them
-replays fine but scores only against external truth.
+replays normally but scores only against external truth.
 
 ## manifest.json
 
@@ -74,8 +73,8 @@ proxied bench replay: oracle spin-up + the replay's own epoch delay). Replay
 is unaffected (embedded receiver timestamps carry the precision), but scoring
 a recording against externally attached truth must first align the time
 bases. Verified 2026-08-31: a synthetic run recorded through the proxy and
-replayed scored p50 44 m after a +7.7 s alignment vs 45 m for the original —
-statistically equivalent, as required.
+replayed scored p50 44 m after a +7.7 s alignment, vs 45 m for the original:
+statistically equivalent.
 
 ## Privacy
 

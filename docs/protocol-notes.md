@@ -36,10 +36,10 @@ Recognized client keys: `sync`, `ssync` (split sync — exists in the client,
 `process_mlat_nongps` (jsonclient.py:650) pairs the raw counter `t` with the
 server's wall clock `now`; `config.MLAT_DELAY = 0.9` s bounds the grouping
 window. Consequences:
-1. Replay send-timing must be accurate to well under ~0.9 s — trivially true
+1. Replay send-timing must be accurate to well under ~0.9 s — satisfied
    in real time with absolute tokio deadlines.
 2. Faster-than-real-time replay CANNOT work without faking the server's clock
-   (libfaketime experiment, M6). Confirmed suspicion R7.
+   (libfaketime experiment, M6).
 3. The GPS path (`process_mlat_gps`) is marked `#UNUSED` — all JSON clients go
    through the nongps path regardless of clock_type.
 
@@ -96,13 +96,13 @@ field [2] tracks the measured pairwise clock offset in ppm — observed values
 matched the scenario's simulated ppm offsets to within rounding (rx-001
 (+3.2) vs rx-002 (−7.8) reported ≈ −11). Treat everything else as opaque.
 
-## Why MAX_SYNC_AC = 15 exists (2026-08-31, learned the hard way)
+## Why MAX_SYNC_AC = 15 exists (2026-08-31, measured while building the candidate)
 
 The oracle caps sync work per aircraft (config.py MAX_SYNC_AC = 15,
 MAX_GROUP = 15). Building the candidate revealed why: at 60 co-hearing
 receivers, per-syncpoint pair training is k² — ~7200 model updates per sync
 event, ~10⁶ updates/s at metro scale. Capping reporters at 15 keeps sync
-overkill-good while cutting the work 16×. These constants are congestion
+quality sufficient and cuts the work 16×. These constants are congestion
 control, not statistics.
 
 ## Oracle behavior under time compression (2026-08-31, observed)
@@ -125,7 +125,7 @@ collapsed a 10-minute run's output to 28 results while the server was
 otherwise healthy (316 clients synced, 1087 aircraft tracked, 40% CPU).
 Bench-local guard patched into oracle/Dockerfile (skip non-finite var_est,
 mirroring the existing "result is suspect" path); reproduction: any
-LocaRDS import replayed at this density. IMPORTANT for fairness: numbers
+LocaRDS import replayed at this density. Fairness note: numbers
 from unpatched-oracle runs at scale measure this bug, not throughput.
 
 ## Open questions

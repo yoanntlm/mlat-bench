@@ -1,8 +1,7 @@
 # Prior art
 
-Annotated bibliography for the algorithm track. The harness exists to make
-these claims testable on identical input; nothing here is folklore we accept —
-each entry states what it would take to verify it on this bench.
+Annotated bibliography for the algorithm track. Each entry states how to
+verify its claim on this bench, on identical input.
 
 ## Production systems
 
@@ -18,8 +17,8 @@ each entry states what it would take to verify it on this bench.
 
 - **OpenSky Aircraft Localization Competition** — crowdsourced-receiver
   localization; winning entry synchronized 241 receivers (36 GPS-equipped,
-  some with broken clocks) and achieved **81.9 m RMSE 2D**. Useful to us as a
-  sanity anchor for "good" accuracy on cheap hardware.
+  some with broken clocks) and achieved **81.9 m RMSE 2D**. A reference
+  point for achievable accuracy on consumer hardware.
   (Engineering Proceedings 13(1):12, mdpi.com/2673-4591/13/1/12)
 - **LocaRDS** — a published localization reference dataset from OpenSky data,
   built exactly for comparable evaluation of MLAT methods.
@@ -34,8 +33,8 @@ each entry states what it would take to verify it on this bench.
   Surveillance with Unsynchronized Low-Cost ADS-B Receivers Using TDOA
   Observations", NAVIGATION 72(3), 2025 (navi.ion.org/content/72/3/navi.704).
   This attacks the pairwise-sync bookkeeping that is mlat-server's scaling
-  bottleneck — the most interesting single experiment this bench could run.
-- **Closed-form TDOA initializers** — Chan-Ho and friends; near-Taylor
+  bottleneck; the highest-priority algorithm experiment for this bench.
+- **Closed-form TDOA initializers** — Chan-Ho and related methods; near-Taylor
   accuracy without iteration/initialization concerns. Candidate for the
   solve stage's seed.
 - **Robust estimation for outliers** — Student's-t / variational Bayes
@@ -44,7 +43,7 @@ each entry states what it would take to verify it on this bench.
 
 ## Verification discipline
 
-A method earns a claim here only via: same capture → oracle and candidate →
+A method earns a claim here only one way: same capture → oracle and candidate →
 `metrics.json` diff. No cross-paper accuracy comparisons — receiver geometry,
 traffic, and noise models differ too much between publications to compare
 numbers across them.

@@ -14,14 +14,14 @@ the mean sphere (error of that approximation ≪ MLAT error).
 - **err_estimate_ratio_p50** — oracle's `err` column ÷ real error, median.
   < 1 means the oracle is overconfident about its own accuracy.
 - **trackable aircraft-second** — a (Mode-S-only aircraft, second) pair with
-  ≥ 4 receivers geometrically audible (radio horizon + range cap; loss is NOT
-  applied — it's the theoretical ceiling).
+  ≥ 4 receivers geometrically audible (radio horizon + range cap; loss is not
+  applied; this is the theoretical ceiling).
 - **coverage ratio** — trackable seconds that got ≥ 1 result ÷ trackable
   seconds. ADS-B aircraft are excluded: they don't need MLAT.
   Caveat: this is bounded above by the server's own output cadence — a server
   emitting one fix per 2 s can never exceed ~50 % under this definition even
   while tracking continuously. Compare coverage between servers at equal
-  output cadence, or lean on TTFF + update rate.
+  output cadence, or use TTFF and update rate.
 - **TTFF** — first result's sim-time minus the aircraft's first trackable
   second. Includes the oracle's sync warm-up, deliberately.
 - **cpu %** — from cgroup v2 `usage_usec` deltas over ~2 s samples; one full
