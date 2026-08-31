@@ -17,6 +17,15 @@ pub struct ClockModel {
     start_count: u64,
     last_count: Option<u64>,
     wraps: bool,
+    // Hostility: frequency random walk (thermal wander) and counter jumps.
+    // Draw from a dedicated per-clock stream so the polite-lab determinism
+    // property (wander == 0, jumps == 0) is untouched.
+    wander_per_sqrt_s: f64, // fractional, per sqrt(second)
+    jump_prob_per_s: f64,
+    hostile_rng: Option<ChaCha12Rng>,
+    wander_accum: f64,   // accumulated fractional offset from the walk
+    wander_phase_s: f64, // integrated extra phase from the walk
+    last_t: f64,
 }
 
 impl ClockModel {
@@ -27,6 +36,8 @@ impl ClockModel {
                 drift_ppm_per_hr,
                 jitter_ns,
                 start_count,
+                wander_ppm_sqrt_hr,
+                jump_prob_per_min,
             } => ClockModel {
                 freq_hz: 12e6,
                 offset: offset_ppm * 1e-6,
@@ -35,6 +46,12 @@ impl ClockModel {
                 start_count,
                 last_count: None,
                 wraps: true,
+                wander_per_sqrt_s: wander_ppm_sqrt_hr * 1e-6 / 60.0,
+                jump_prob_per_s: jump_prob_per_min / 60.0,
+                hostile_rng: None,
+                wander_accum: 0.0,
+                wander_phase_s: 0.0,
+                last_t: 0.0,
             },
             ClockSpec::RadarcapeGps { jitter_ns } => ClockModel {
                 freq_hz: 1e9,
@@ -44,8 +61,23 @@ impl ClockModel {
                 start_count: 0,
                 last_count: None,
                 wraps: false,
+                wander_per_sqrt_s: 0.0,
+                jump_prob_per_s: 0.0,
+                hostile_rng: None,
+                wander_accum: 0.0,
+                wander_phase_s: 0.0,
+                last_t: 0.0,
             },
         }
+    }
+
+    /// Arm the hostility stream (only clocks with wander/jumps need one).
+    pub fn set_hostile_rng(&mut self, rng: rand_chacha::ChaCha12Rng) {
+        self.hostile_rng = Some(rng);
+    }
+
+    pub fn is_hostile(&self) -> bool {
+        self.wander_per_sqrt_s > 0.0 || self.jump_prob_per_s > 0.0
     }
 
     pub const fn wire_clock_type(spec: &ClockSpec) -> &'static str {
@@ -61,8 +93,40 @@ impl ClockModel {
     /// processed sorted); monotonicity is clamped so ns-scale jitter can
     /// never make the wire counter step backwards.
     pub fn count_at(&mut self, t_s: f64, rng: &mut ChaCha12Rng) -> u64 {
+        self.count_at_hostile(t_s, rng).0
+    }
+
+    /// Like count_at, also reporting whether a counter jump happened at this
+    /// reception (the client then sends clock_jump, as real mlat-client does).
+    pub fn count_at_hostile(&mut self, t_s: f64, rng: &mut ChaCha12Rng) -> (u64, bool) {
+        let mut jumped = false;
+        let dt = (t_s - self.last_t).max(0.0);
+        self.last_t = t_s;
+        if let Some(h) = self.hostile_rng.as_mut() {
+            if self.wander_per_sqrt_s > 0.0 && dt > 0.0 {
+                // Integrate the random walk: offset does a gaussian step
+                // scaled by sqrt(dt); phase accumulates the current offset.
+                self.wander_phase_s += self.wander_accum * dt;
+                self.wander_accum += gaussian(h) * self.wander_per_sqrt_s * dt.sqrt();
+            }
+            if self.jump_prob_per_s > 0.0 && h.gen_range(0.0f64..1.0) < self.jump_prob_per_s * dt {
+                // ±1..100 ms worth of counts, either direction.
+                let ms = h.gen_range(1.0f64..100.0)
+                    * if h.gen_range(0.0f64..1.0) < 0.5 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                self.wander_phase_s += ms / 1000.0;
+                self.last_count = None; // jump breaks monotonic continuity
+                jumped = true;
+            }
+        }
         let jitter = gaussian(rng) * self.jitter_s;
-        let phase_s = t_s * (1.0 + self.offset) + 0.5 * self.drift_per_s * t_s * t_s + jitter;
+        let phase_s = t_s * (1.0 + self.offset)
+            + 0.5 * self.drift_per_s * t_s * t_s
+            + self.wander_phase_s
+            + jitter;
         let raw = self.start_count as f64 + phase_s * self.freq_hz;
         let mut count = if self.wraps {
             (raw.round() as i128).rem_euclid(WRAP_48 as i128) as u64
@@ -77,7 +141,7 @@ impl ClockModel {
             }
         }
         self.last_count = Some(count);
-        count
+        (count, jumped)
     }
 }
 
@@ -100,6 +164,8 @@ mod tests {
             drift_ppm_per_hr: 0.0,
             jitter_ns: 0.0,
             start_count: 0,
+            wander_ppm_sqrt_hr: 0.0,
+            jump_prob_per_min: 0.0,
         }
     }
 
@@ -127,6 +193,8 @@ mod tests {
             drift_ppm_per_hr: 3600.0, // 1 ppm per second — huge, for arithmetic clarity
             jitter_ns: 0.0,
             start_count: 0,
+            wander_ppm_sqrt_hr: 0.0,
+            jump_prob_per_min: 0.0,
         });
         let mut rng = rng_for(1, "t");
         // phase = t + 0.5 * 1e-6 * t^2 ; t=100 → +0.005 s → +60000 counts
@@ -140,6 +208,8 @@ mod tests {
             drift_ppm_per_hr: 0.0,
             jitter_ns: 0.0,
             start_count: (1u64 << 48) - 6_000_000, // 0.5 s before wrap
+            wander_ppm_sqrt_hr: 0.0,
+            jump_prob_per_min: 0.0,
         });
         let mut rng = rng_for(1, "t");
         let before = c.count_at(0.25, &mut rng);
@@ -155,6 +225,8 @@ mod tests {
             drift_ppm_per_hr: 0.0,
             jitter_ns: 500.0,
             start_count: 0,
+            wander_ppm_sqrt_hr: 0.0,
+            jump_prob_per_min: 0.0,
         });
         let mut rng = rng_for(1, "t");
         let mut prev = 0;

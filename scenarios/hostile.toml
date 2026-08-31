@@ -1,0 +1,142 @@
+# smoke — the M3 gate scenario. Small enough to run in 10 minutes, dense
+# enough that the oracle must sync all receivers and multilaterate the three
+# Mode-S-only aircraft.
+#
+# Geometry: five receivers around the Nantes area, 20–80 km apart (the oracle
+# pairs receivers for sync only within 500 km, and closer geometry = better
+# GDOP for the position solve). All traffic overflies the middle of the
+# polygon at altitude, so every receiver hears everything (radio horizon at
+# 35000 ft is ~430 km).
+
+[meta]
+name = "hostile"
+seed = 42
+duration_s = 600
+
+[network]
+latency_ms_min = 5.0
+latency_ms_max = 40.0
+jitter_ms = 4.0            # per-message network jitter — real internet
+
+# --- receivers ---------------------------------------------------------
+# A mix of clock qualities: one GPS-disciplined anchor, four consumer
+# dump1090 clocks with offsets well inside the oracle's 100 ppm assumption.
+
+[[receivers]]
+id = "rx-000"
+lat = 47.2181
+lon = -1.5528
+alt_m = 40
+clock = { type = "radarcape_gps" }
+
+[[receivers]]
+id = "rx-001"
+lat = 47.4802
+lon = -1.0511
+alt_m = 85
+# Thermal wander: the linear-drift assumption stops being true.
+clock = { type = "dump1090", offset_ppm = 3.2, drift_ppm_per_hr = 0.05, jitter_ns = 40, wander_ppm_sqrt_hr = 0.6 }
+
+[[receivers]]
+id = "rx-002"
+lat = 46.9433
+lon = -1.1002
+alt_m = 60
+clock = { type = "dump1090", offset_ppm = -7.8, drift_ppm_per_hr = 0.02, jitter_ns = 60 }
+multipath_prob = 0.03      # 3% of receptions stamp a reflection, +0.5..3 µs
+
+[[receivers]]
+id = "rx-003"
+lat = 47.0821
+lon = -2.0107
+alt_m = 25
+# The worst feeder on the network: clock near the oracle's 100 ppm assumption
+# ceiling, huge jitter, occasional counter jumps, heavy loss.
+clock = { type = "dump1090", offset_ppm = 85.0, drift_ppm_per_hr = 0.4, jitter_ns = 400, jump_prob_per_min = 0.5 }
+loss_prob = 0.15
+
+[[receivers]]
+id = "rx-004"
+lat = 47.5934
+lon = -1.7523
+alt_m = 110
+clock = { type = "dump1090", offset_ppm = -1.1, drift_ppm_per_hr = 0.03, jitter_ns = 45 }
+reported_pos_error_m = 250.0   # mistyped coordinates: handshake lies by 250 m
+
+# --- ADS-B aircraft: the sync sources ----------------------------------
+# Eight airliners criss-crossing the receiver polygon at cruise.
+
+[[aircraft]]
+icao = "3C6444"
+kind = "adsb"
+traj = { type = "great_circle", from = [46.60, -2.60, 35000], to = [47.90, -0.40, 35000], gs_kts = 460 }
+
+[[aircraft]]
+icao = "4CA2B7"
+kind = "adsb"
+traj = { type = "great_circle", from = [47.95, -2.30, 37000], to = [46.55, -0.75, 37000], gs_kts = 470 }
+
+[[aircraft]]
+icao = "406A9E"
+kind = "adsb"
+traj = { type = "great_circle", from = [46.70, -0.55, 33000], to = [47.75, -2.55, 33000], gs_kts = 450 }
+
+[[aircraft]]
+icao = "39856C"
+kind = "adsb"
+traj = { type = "great_circle", from = [47.85, -0.60, 39000], to = [46.65, -2.45, 39000], gs_kts = 480 }
+
+[[aircraft]]
+icao = "484B12"
+kind = "adsb"
+traj = { type = "great_circle", from = [46.55, -1.55, 36000], to = [47.95, -1.50, 36000], gs_kts = 455 }
+
+[[aircraft]]
+icao = "A1B2C3"
+kind = "adsb"
+traj = { type = "great_circle", from = [47.90, -1.10, 34000], to = [46.60, -2.00, 34000], gs_kts = 445 }
+
+[[aircraft]]
+icao = "3C0FF1"
+kind = "adsb"
+traj = { type = "great_circle", from = [47.20, -2.70, 38000], to = [47.30, -0.35, 38000], gs_kts = 465 }
+
+[[aircraft]]
+icao = "4B1789"
+kind = "adsb"
+traj = { type = "great_circle", from = [47.65, -2.60, 32000], to = [46.80, -0.45, 32000], gs_kts = 440 }
+
+# --- Mode-S-only aircraft: what the oracle must multilaterate ------------
+# Lower and slower — military/GA-ish profiles without ADS-B out.
+
+[[aircraft]]
+icao = "3944F1"
+kind = "modes_only"
+df11_rate_hz = 1.0
+df4_rate_hz = 4.0
+traj = { type = "great_circle", from = [47.55, -2.20, 21000], to = [46.85, -0.80, 21000], gs_kts = 380 }
+
+[[aircraft]]
+icao = "43BF3D"
+kind = "modes_only"
+df11_rate_hz = 1.2
+df4_rate_hz = 5.0
+traj = { type = "great_circle", from = [46.75, -1.90, 18000], to = [47.70, -1.05, 18000], gs_kts = 350 }
+
+[[aircraft]]
+icao = "AE01CE"
+kind = "modes_only"
+df11_rate_hz = 0.8
+df4_rate_hz = 3.0
+traj = { type = "great_circle", from = [47.10, -0.50, 25000], to = [47.35, -2.60, 25000], gs_kts = 420 }
+
+# --- the liar -----------------------------------------------------------
+# An ADS-B aircraft whose broadcast positions are 3 km off its true track.
+# A server that trusts sync sources blindly inherits the lie into its
+# clock models; a robust one notices the inconsistency.
+
+[[aircraft]]
+icao = "BADA55"
+kind = "adsb"
+nav_error_m = 3000.0
+traj = { type = "great_circle", from = [46.70, -2.40, 36000], to = [47.80, -0.70, 36000], gs_kts = 455 }

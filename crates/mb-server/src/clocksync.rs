@@ -40,10 +40,14 @@ impl PairModel {
     }
 
     /// Convert a from-clock reading to the to-clock, if the model is sound.
-    /// Returns the converted time AND the fit's own residual RMS — the honest
-    /// per-pair timing error, which downstream weighting and gating need far
-    /// more than any per-clock-type constant (bench evidence: the est column
-    /// underestimated ~2-3x during sync-noise bursts with constant errors).
+    /// Returns the converted time AND the prediction-interval sigma.
+    ///
+    /// The fit is TRIMMED: fit once, drop observations whose residual exceeds
+    /// max(3×RMS, 500 ns), refit with the survivors. A lying sync source
+    /// (bad navigation → wrong propagation correction, ±µs correlated error)
+    /// or a multipath-stamped reception poisons a democratic fit wholesale —
+    /// the hostile bench measured 2× accuracy loss before trimming. The
+    /// oracle's clocktrack rejects sync outliers for the same reason.
     pub fn convert(&self, t_from: f64) -> Option<(f64, f64)> {
         let n = self.obs.len();
         if n < MIN_OBS {
@@ -53,43 +57,77 @@ impl PairModel {
         if span < MIN_SPAN_S {
             return None;
         }
-        let mean_a: f64 = self.obs.iter().map(|(a, _)| a).sum::<f64>() / n as f64;
-        let mean_b: f64 = self.obs.iter().map(|(_, b)| b).sum::<f64>() / n as f64;
-        let mut sxx = 0.0;
-        let mut sxy = 0.0;
-        for (a, b) in &self.obs {
-            let da = a - mean_a;
-            sxx += da * da;
-            sxy += da * (b - mean_b);
-        }
-        if sxx <= 0.0 {
-            return None;
-        }
-        let beta = sxy / sxx;
-        let alpha = mean_b - beta * mean_a;
-        let sigma_fit = (self
+        let first = fit(&self.obs)?;
+        let cut = (3.0 * first.sigma_fit).max(500e-9);
+        let kept: Vec<(f64, f64)> = self
             .obs
             .iter()
-            .map(|(a, b)| {
-                let e = b - (alpha + beta * a);
-                e * e
-            })
-            .sum::<f64>()
-            / n as f64)
-            .sqrt();
-        // PREDICTION interval, not fit residual: the (t−t̄)²/Sxx term blows
-        // up exactly when the model is young or extrapolating past its
-        // window — the two phases where the bench measured km-scale errors
-        // hiding behind a 24 m fit sigma. Honest sigma lets the covariance
-        // gate and accuracy throttle downstream do their jobs.
-        let da = t_from - mean_a;
-        let infl = (1.0 + 1.0 / n as f64 + da * da / sxx).sqrt();
-        let sigma_pred = sigma_fit * infl;
+            .filter(|(a, b)| (b - (first.alpha + first.beta * a)).abs() <= cut)
+            .copied()
+            .collect();
+        let f = if kept.len() >= MIN_OBS && kept.len() < n {
+            fit(&kept)?
+        } else {
+            first
+        };
+        // Prediction interval: inflates for young or extrapolating models —
+        // exactly the phases where km-scale errors hid behind tiny fit
+        // residuals (bench, seeds 42 + 1337).
+        let da = t_from - f.mean_a;
+        let infl = (1.0 + 1.0 / f.n as f64 + da * da / f.sxx).sqrt();
+        let sigma_pred = f.sigma_fit * infl;
         if sigma_pred > MAX_PRED_SIGMA_S {
-            return None; // conversion too uncertain to contribute at all
+            return None; // too uncertain to contribute at all
         }
-        Some((alpha + beta * t_from, sigma_pred))
+        Some((f.alpha + f.beta * t_from, sigma_pred))
     }
+}
+
+struct Fit {
+    alpha: f64,
+    beta: f64,
+    sigma_fit: f64,
+    mean_a: f64,
+    sxx: f64,
+    n: usize,
+}
+
+fn fit(obs: &[(f64, f64)]) -> Option<Fit> {
+    let n = obs.len();
+    if n < 2 {
+        return None;
+    }
+    let mean_a: f64 = obs.iter().map(|(a, _)| a).sum::<f64>() / n as f64;
+    let mean_b: f64 = obs.iter().map(|(_, b)| b).sum::<f64>() / n as f64;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    for (a, b) in obs {
+        let da = a - mean_a;
+        sxx += da * da;
+        sxy += da * (b - mean_b);
+    }
+    if sxx <= 0.0 {
+        return None;
+    }
+    let beta = sxy / sxx;
+    let alpha = mean_b - beta * mean_a;
+    let sigma_fit = (obs
+        .iter()
+        .map(|(a, b)| {
+            let e = b - (alpha + beta * a);
+            e * e
+        })
+        .sum::<f64>()
+        / n as f64)
+        .sqrt();
+    Some(Fit {
+        alpha,
+        beta,
+        sigma_fit,
+        mean_a,
+        sxx,
+        n,
+    })
 }
 
 #[cfg(test)]
@@ -108,6 +146,26 @@ mod tests {
         let want = 0.0005 + 100.0 * (1.0 + 10e-6);
         assert!((got - want).abs() < 1e-9, "{got} vs {want}");
         assert!(sigma < 1e-9, "perfect data must fit tightly: {sigma}");
+    }
+
+    #[test]
+    fn trims_poisoned_observations() {
+        // Clean linear relation + 10% gross outliers (the liar / multipath).
+        // Untrimmed, the fit is dragged µs off; trimmed, conversion stays ns.
+        let mut m = PairModel::default();
+        for i in 0..50 {
+            let t = i as f64;
+            let poison = if i % 10 == 3 { 2e-6 } else { 0.0 };
+            m.push(t, 0.0005 + t * (1.0 + 10e-6) + poison);
+        }
+        let (got, sigma) = m.convert(50.0).unwrap();
+        let want = 0.0005 + 50.0 * (1.0 + 10e-6);
+        assert!(
+            (got - want).abs() < 100e-9,
+            "residual poison: {} ns",
+            (got - want).abs() * 1e9
+        );
+        assert!(sigma < 500e-9, "sigma should reflect the clean fit: {sigma}");
     }
 
     #[test]

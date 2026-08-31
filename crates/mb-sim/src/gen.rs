@@ -105,6 +105,18 @@ pub fn generate(sc: &Scenario) -> Result<GeneratedCapture, String> {
             });
         }
 
+        // The "liar": a fixed seeded offset applied to BROADCAST positions
+        // only — truth and physics stay honest, the aircraft just reports
+        // wrong coordinates (GPS-degraded / spoofed navigation).
+        let nav_off = if ac.nav_error_m > 0.0 {
+            let th: f64 = rng.gen_range(0.0..std::f64::consts::TAU);
+            (
+                ac.nav_error_m * th.sin() / 111_320.0,
+                ac.nav_error_m * th.cos() / 111_320.0, // corrected per-lat below
+            )
+        } else {
+            (0.0, 0.0)
+        };
         match ac.kind {
             AircraftKind::Adsb => {
                 // Even/odd alternating at pos_rate_hz with a small phase
@@ -117,15 +129,12 @@ pub fn generate(sc: &Scenario) -> Result<GeneratedCapture, String> {
                     let jt = t + rng.gen_range(-0.02..0.02);
                     if jt >= 0.0 && jt < dur_s {
                         let pos = ac.traj.position_at(jt);
+                        let bpos_lat = pos.lat_deg + nav_off.0;
+                        let bpos_lon =
+                            pos.lon_deg + nav_off.1 / pos.lat_deg.to_radians().cos().max(0.2);
                         let alt_ft = mb_modes::alt::quantize_25ft(pos.alt_m / 0.3048);
                         if let Some(f) = mb_modes::frames::df17_airborne_position(
-                            icao,
-                            5,
-                            11,
-                            alt_ft,
-                            pos.lat_deg,
-                            pos.lon_deg,
-                            odd,
+                            icao, 5, 11, alt_ft, bpos_lat, bpos_lon, odd,
                         ) {
                             broadcasts.push(Broadcast {
                                 t_s: jt,
@@ -210,6 +219,13 @@ pub fn generate(sc: &Scenario) -> Result<GeneratedCapture, String> {
     })
 }
 
+/// Box-Muller, local copy (clock.rs keeps its own private one).
+fn gaussian_pub(rng: &mut rand_chacha::ChaCha12Rng) -> f64 {
+    let u1: f64 = rng.gen_range(f64::EPSILON..1.0);
+    let u2: f64 = rng.gen_range(0.0..1.0);
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
 fn exp_gap(rng: &mut rand_chacha::ChaCha12Rng, rate_hz: f64) -> f64 {
     let u: f64 = rng.gen_range(f64::EPSILON..1.0);
     -u.ln() / rate_hz
@@ -236,13 +252,33 @@ fn build_client(
         other => return Err(format!("unknown compress {other}")),
     };
     let clock_type_str = ClockModel::wire_clock_type(&rx.clock);
+
+    let mut net_rng = rng_for(seed, &format!("net/{}", rx.id));
+    let latency_s =
+        net_rng.gen_range(sc.network.latency_ms_min..=sc.network.latency_ms_max) / 1000.0;
+    let jitter_s = sc.network.jitter_ms / 1000.0;
+
+    // Reported (handshake) position: true position + a fixed seeded offset.
+    let (rep_lat, rep_lon) = if rx.reported_pos_error_m > 0.0 {
+        let th: f64 = net_rng.gen_range(0.0..std::f64::consts::TAU);
+        (
+            rx.lat + rx.reported_pos_error_m * th.sin() / 111_320.0,
+            rx.lon
+                + rx.reported_pos_error_m * th.cos()
+                    / (111_320.0 * rx.lat.to_radians().cos().max(0.2)),
+        )
+    } else {
+        (rx.lat, rx.lon)
+    };
+    let mut mp_rng = rng_for(seed, &format!("mp/{}", rx.id));
+
     let handshake = Handshake {
         version: 3,
         user: rx.id.clone(),
         uuid: None,
         compress: vec![compress],
-        lat: rx.lat,
-        lon: rx.lon,
+        lat: rep_lat,
+        lon: rep_lon,
         alt: rx.alt_m,
         clock_type: match rx.clock {
             ClockSpec::Dump1090 { .. } => ClockType::Dump1090,
@@ -253,11 +289,10 @@ fn build_client(
         client_version: Some(format!("mlat-bench {}", env!("CARGO_PKG_VERSION"))),
     };
 
-    let mut net_rng = rng_for(seed, &format!("net/{}", rx.id));
-    let latency_s =
-        net_rng.gen_range(sc.network.latency_ms_min..=sc.network.latency_ms_max) / 1000.0;
-
     let mut clock = ClockModel::new(&rx.clock);
+    if clock.is_hostile() {
+        clock.set_hostile_rng(rng_for(seed, &format!("hostile/{}", rx.id)));
+    }
     // One jitter stream per (rx, aircraft) keeps draws stable when the
     // scenario gains or loses other aircraft.
     let mut jitter_rngs: std::collections::HashMap<Icao, rand_chacha::ChaCha12Rng> =
@@ -289,7 +324,12 @@ fn build_client(
         if loss.gen_range(0.0..1.0) < rx.loss_prob {
             continue;
         }
-        let t_arrive = b.t_s + rx.pos().slant_range_m(&b.pos) / C_MPS;
+        let mut t_arrive = b.t_s + rx.pos().slant_range_m(&b.pos) / C_MPS;
+        if rx.multipath_prob > 0.0 && mp_rng.gen_range(0.0f64..1.0) < rx.multipath_prob {
+            // A reflection's longer path: the direct pulse was missed and the
+            // echo got stamped instead.
+            t_arrive += mp_rng.gen_range(0.5e-6..3e-6);
+        }
         while next_hb < t_arrive {
             lines.push((next_hb, ClientMsg::heartbeat_now().to_line()));
             message_count += 1;
@@ -298,7 +338,12 @@ fn build_client(
         let jit = jitter_rngs
             .entry(b.icao)
             .or_insert_with(|| rng_for(seed, &format!("clkjit/{}/{}", rx.id, b.icao.to_hex())));
-        let count = clock.count_at(t_arrive, jit);
+        let (count, jumped) = clock.count_at_hostile(t_arrive, jit);
+        if jumped {
+            // Real mlat-client detects the discontinuity and tells the server.
+            lines.push((t_arrive, ClientMsg::ClockJump("jump".into()).to_line()));
+            message_count += 1;
+        }
 
         if seen.insert(b.icao) {
             lines.push((t_arrive, ClientMsg::seen(&[b.icao]).to_line()));
@@ -361,7 +406,7 @@ fn build_client(
     // per broadcast, so arrival order can differ by a few ms — sort, as the
     // real receiver's input naturally is.
     lines.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let records = frame_lines(&lines, compress, latency_s)?;
+    let records = frame_lines(&lines, compress, latency_s, jitter_s, &mut net_rng)?;
 
     Ok(ClientStream {
         id: rx.id.clone(),
@@ -382,13 +427,22 @@ fn frame_lines(
     lines: &[(f64, Vec<u8>)],
     compress: Compress,
     latency_s: f64,
+    jitter_s: f64,
+    rng: &mut rand_chacha::ChaCha12Rng,
 ) -> Result<Vec<SendRecord>, String> {
-    let to_nanos = |t: f64| SimNanos((((t + latency_s) * 1e9).round()).max(0.0) as u64);
+    let to_nanos = |t: f64, rng: &mut rand_chacha::ChaCha12Rng| {
+        let j = if jitter_s > 0.0 {
+            (gaussian_pub(rng) * jitter_s).max(-latency_s * 0.9)
+        } else {
+            0.0
+        };
+        SimNanos((((t + latency_s + j) * 1e9).round()).max(0.0) as u64)
+    };
     match compress {
         Compress::None => Ok(lines
             .iter()
             .map(|(t, l)| SendRecord {
-                t: to_nanos(*t),
+                t: to_nanos(*t, rng),
                 bytes: l.clone(),
             })
             .collect()),
@@ -398,7 +452,7 @@ fn frame_lines(
                 .iter()
                 .map(|(t, l)| {
                     Ok(SendRecord {
-                        t: to_nanos(*t),
+                        t: to_nanos(*t, rng),
                         bytes: enc.encode_frame(l).map_err(|e| e.to_string())?,
                     })
                 })
@@ -417,7 +471,7 @@ fn frame_lines(
                 while *t >= window_end {
                     if !batch.is_empty() {
                         out.push(SendRecord {
-                            t: to_nanos(window_end),
+                            t: to_nanos(window_end, rng),
                             bytes: enc.encode_frame(&batch).map_err(|e| e.to_string())?,
                         });
                         batch.clear();
@@ -428,7 +482,7 @@ fn frame_lines(
             }
             if !batch.is_empty() {
                 out.push(SendRecord {
-                    t: to_nanos(window_end),
+                    t: to_nanos(window_end, rng),
                     bytes: enc.encode_frame(&batch).map_err(|e| e.to_string())?,
                 });
             }

@@ -18,9 +18,10 @@ mod state;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use mb_proto::framing::ZlibFrameDecoder;
 use state::{ReceiverInfo, State};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
@@ -101,25 +102,34 @@ async fn handle_client(
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (rd, mut wr) = stream.into_split();
-    let mut lines = BufReader::new(rd).lines();
+    let mut rd = BufReader::new(rd);
 
     // ---- handshake -------------------------------------------------------
-    let hs_line = lines
-        .next_line()
-        .await?
-        .context("closed before handshake")?;
-    let hs: serde_json::Value = serde_json::from_str(&hs_line).context("handshake not JSON")?;
-    let offers_none = hs["compress"]
-        .as_array()
-        .map(|a| a.iter().any(|c| c == "none"))
-        .unwrap_or(false);
-    if !offers_none {
-        wr.write_all(
-            b"{\"deny\":[\"mb-server v0 speaks compress=none only\"],\"reconnect_in\":300}\n",
-        )
-        .await?;
-        anyhow::bail!("client did not offer compress=none");
+    let mut hs_line = Vec::new();
+    rd.read_until(b'\n', &mut hs_line).await?;
+    if hs_line.is_empty() {
+        anyhow::bail!("closed before handshake");
     }
+    let hs: serde_json::Value = serde_json::from_slice(&hs_line).context("handshake not JSON")?;
+    // Compression preference: none (cheapest for us), else zlib2, else zlib —
+    // real feeders overwhelmingly offer zlib2 and denying them would be
+    // instant disqualification in the field.
+    let offered: Vec<String> = hs["compress"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let negotiated = ["none", "zlib2", "zlib"]
+        .into_iter()
+        .find(|m| offered.iter().any(|o| o == m));
+    let Some(negotiated) = negotiated else {
+        wr.write_all(b"{\"deny\":[\"no supported compression offered\"],\"reconnect_in\":300}\n")
+            .await?;
+        anyhow::bail!("client offered none of none/zlib/zlib2");
+    };
     let (Some(lat), Some(lon), Some(alt)) =
         (hs["lat"].as_f64(), hs["lon"].as_f64(), hs["alt"].as_f64())
     else {
@@ -151,44 +161,98 @@ async fn handle_client(
         // sync model's noise on top of their own.
         jitter_s: if gps { 30e-9 } else { 150e-9 },
     });
-    wr.write_all(
-        b"{\"compress\":\"none\",\"reconnect_in\":300,\"selective_traffic\":false,\
-          \"heartbeat\":true,\"return_results\":false,\"rate_reports\":false,\
-          \"motd\":\"mlat-bench candidate mb-server\"}\n",
-    )
-    .await?;
-    println!("mb-server: {user} connected ({clock_type})");
+    let reply = format!(
+        "{{\"compress\":\"{negotiated}\",\"reconnect_in\":300,\"selective_traffic\":false,\
+         \"heartbeat\":true,\"return_results\":false,\"rate_reports\":false,\
+         \"motd\":\"mlat-bench candidate mb-server\"}}\n"
+    );
+    wr.write_all(reply.as_bytes()).await?;
+    println!("mb-server: {user} connected ({clock_type}, {negotiated})");
 
     // ---- message loop ----------------------------------------------------
     let mut hb = tokio::time::interval(hb_real);
     hb.tick().await; // consume immediate first tick
+    let mut zdec = if negotiated == "none" {
+        None
+    } else {
+        Some(ZlibFrameDecoder::new())
+    };
     loop {
-        tokio::select! {
-            _ = hb.tick() => {
-                let st = state.lock().unwrap().scaled_now();
-                let line = format!("{{\"heartbeat\":{{\"server_time\":{st:.3}}}}}\n");
-                wr.write_all(line.as_bytes()).await?;
-            }
-            line = lines.next_line() => {
-                let Some(line) = line? else { break };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-                let mut s = state.lock().unwrap();
-                if let Some(sy) = v.get("sync") {
-                    let (Some(et), Some(ot), Some(em), Some(om)) = (
-                        sy["et"].as_f64(), sy["ot"].as_f64(),
-                        sy["em"].as_str(), sy["om"].as_str(),
-                    ) else { continue };
-                    s.on_sync(rx, et, ot, em, om);
-                } else if let Some(ml) = v.get("mlat") {
-                    let (Some(t), Some(m)) = (ml["t"].as_f64(), ml["m"].as_str()) else { continue };
-                    s.on_mlat(rx, t, m);
-                } else if v.get("clock_reset").is_some() || v.get("clock_jump").is_some() {
-                    s.clock_reset(rx);
+        match &mut zdec {
+            None => {
+                let mut line = Vec::new();
+                tokio::select! {
+                    _ = hb.tick() => send_heartbeat(&state, &mut wr).await?,
+                    r = rd.read_until(b'\n', &mut line) => {
+                        if r? == 0 { break }
+                        process_line(&state, rx, &line);
+                    }
                 }
-                // seen/lost/heartbeat/rate_report/input_*: no state needed in v0.
+            }
+            Some(dec) => {
+                // Framed: 2-byte BE length + zlib payload with persistent
+                // dictionary state (mb-proto framing; the same code the
+                // capture generator uses, exercised from the other side).
+                let mut lenb = [0u8; 2];
+                tokio::select! {
+                    _ = hb.tick() => { send_heartbeat(&state, &mut wr).await?; continue }
+                    r = rd.read_exact(&mut lenb) => {
+                        if r.is_err() { break }
+                    }
+                }
+                let want = u16::from_be_bytes(lenb) as usize;
+                let mut payload = vec![0u8; 2 + want];
+                payload[..2].copy_from_slice(&lenb);
+                if rd.read_exact(&mut payload[2..]).await.is_err() {
+                    break;
+                }
+                let Ok(chunk) = dec.decode_frame(&payload) else {
+                    anyhow::bail!("zlib frame decode failed for {user}");
+                };
+                for line in chunk.split(|b| *b == b'\n') {
+                    if !line.is_empty() {
+                        process_line(&state, rx, line);
+                    }
+                }
             }
         }
     }
     println!("mb-server: {user} disconnected");
     Ok(())
+}
+
+async fn send_heartbeat(
+    state: &Arc<Mutex<State>>,
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+) -> Result<()> {
+    let st = state.lock().unwrap().scaled_now();
+    let line = format!("{{\"heartbeat\":{{\"server_time\":{st:.3}}}}}\n");
+    wr.write_all(line.as_bytes()).await?;
+    Ok(())
+}
+
+fn process_line(state: &Arc<Mutex<State>>, rx: usize, line: &[u8]) {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return;
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(sy) = v.get("sync") {
+        let (Some(et), Some(ot), Some(em), Some(om)) = (
+            sy["et"].as_f64(),
+            sy["ot"].as_f64(),
+            sy["em"].as_str(),
+            sy["om"].as_str(),
+        ) else {
+            return;
+        };
+        s.on_sync(rx, et, ot, em, om);
+    } else if let Some(ml) = v.get("mlat") {
+        let (Some(t), Some(m)) = (ml["t"].as_f64(), ml["m"].as_str()) else {
+            return;
+        };
+        s.on_mlat(rx, t, m);
+    } else if v.get("clock_reset").is_some() || v.get("clock_jump").is_some() {
+        s.clock_reset(rx);
+    }
+    // seen/lost/heartbeat/rate_report/input_*: no state needed yet.
 }
