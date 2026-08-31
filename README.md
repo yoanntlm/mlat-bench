@@ -98,10 +98,49 @@ _cluster_timestamps), and prediction-interval sigmas on the pair models
 (young/extrapolating sync models hid km-scale errors behind 24 m fit
 residuals; seed 1337's p99 went 592 m → 112 m).
 
-Honest scope: these numbers are one synthetic scenario family with clean
-Gaussian clocks — no multipath, no broken feeders, no zlib clients, no
-result return. The stress scenarios are where the oracle's remaining battle
-scars should show; that's the next chapter, and the bench is ready for it.
+### Three worlds
+
+The lab table above is the friendly world. Two harder ones, same protocol:
+
+**Hostile** (`scenarios/hostile.toml`: a lying ADS-B sync source, multipath
+spikes, a receiver with wrong reported coordinates, out-of-spec wandering
+and jumping clocks, 4 ms network jitter, heavy loss):
+
+| | oracle | mb-server |
+|---|---|---|
+| p50 / p90 / p99 | **80** / 301 / 919 m | 105 / **293** / **852** m |
+| ghosts (gross) | 5 | **0** |
+| CPU / RSS (10×) | 13.9 % / 72 MB | **4.3 % / 6 MB** |
+
+The oracle's decade of field scars is real and measurable: it still wins the
+hostile median. The candidate wins the tail, the ghost discipline, and the
+resources. Closing that median gap is the open accuracy frontier.
+
+**Metro scale** (`scenarios/metro-scale.toml`: 60 receivers, 60 aircraft,
+150 km radius, both servers at a gentle 2× replay):
+
+| | oracle | mb-server |
+|---|---|---|
+| results | 637 | **6143** |
+| coverage | 4 % | **47 %** |
+| ghost rate | 5.2 % | **0.1 %** |
+| p50 | 47 m* | 65 m |
+| CPU / RSS | 32.5 % / 91 MB | **15.8 % / 32 MB** |
+
+*computed over the 4 % of aircraft-seconds it covered — survivorship, not
+superiority. A single-partition oracle at this receiver density abdicates;
+real deployments shard regionally, which is exactly the operational cost the
+candidate's headroom avoids. (At 5× compression the oracle's ghost rate hit
+31 % — see docs/protocol-notes.md on time-compression fairness.)
+
+Bench-rejected ideas are kept in the code as comments (unconditional
+leave-one-out, residual-variance weighting) so they don't get retried; the
+k²-sync wall at scale turned out to be why the oracle's MAX_SYNC_AC = 15
+exists — congestion control, not statistics.
+
+Honest scope: all synthetic. No real RF, no real feeder zoo, no result
+return to clients, no reconnect/blacklist plumbing. Real-data import
+(LocaRDS; live recordings via `record`) is the next chapter.
 
 ## Docs
 
