@@ -257,7 +257,10 @@ from first minute to last. `tools/fetch_locards.sh` re-fetches the dataset.
 
 ## Licensing boundary
 
-The harness is MIT OR Apache-2.0. The oracle server is AGPLv3 and lives only
+The harness is MIT OR Apache-2.0, with one exception: `crates/mlatd`, the
+candidate server, is AGPL-3.0-or-later (LICENSE-AGPL) — the same license as
+the mlat-server it replaces; its product repo is
+github.com/flightportrait/mlatd. The oracle server is AGPLv3 and lives only
 in its own container, built from upstream source at image build time; no
 server code is vendored into this repository. Credit where it's due: the MLAT
 protocol and server are the work of Oliver Jowett (mutability) and wiedehopf.
