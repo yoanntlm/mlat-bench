@@ -1,0 +1,23 @@
+# metro-scale — the scale gauntlet: 60 receivers and 60 aircraft over a
+# 150 km-radius region, procedurally generated (deterministic from the seed).
+# This is where pairwise-sync bookkeeping and per-message costs stop being
+# theoretical. Run at --speed 5: at this traffic volume 10x measures the
+# Python event loop, not the algorithm.
+
+[meta]
+name = "metro"
+seed = 42
+duration_s = 600
+
+[network]
+latency_ms_min = 5.0
+latency_ms_max = 60.0
+jitter_ms = 2.0
+
+[generate]
+receivers = 60
+aircraft_adsb = 40
+aircraft_modes = 20
+center = [47.2, -1.5]
+radius_km = 150.0
+gps_fraction = 0.1

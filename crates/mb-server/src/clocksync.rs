@@ -12,8 +12,16 @@
 #[derive(Default)]
 pub struct PairModel {
     /// (t_from_s, t_to_s) — same physical transmission expressed in each
-    /// receiver's (propagation-corrected) clock.
-    obs: Vec<(f64, f64)>,
+    /// receiver's (propagation-corrected) clock. Deque: expiry pops the
+    /// front, amortized O(1) — the old retain() scan per push was ~40% of a
+    /// core at metro scale.
+    obs: std::collections::VecDeque<(f64, f64)>,
+    /// Cached trimmed fit + staleness counter. At metro scale convert() is
+    /// called once per observation per solve; refitting 400 points each time
+    /// saturated a core (bench: 104% CPU at 5×). A fit a few observations
+    /// stale is statistically identical.
+    cached: Option<Fit>,
+    stale: u32,
 }
 
 /// Model quality gates: below these, conversions are refused rather than
@@ -26,16 +34,19 @@ const MAX_OBS: usize = 400;
 /// observation is worse than a missing one (bench: minute-1 and minute-9
 /// tails, seeds 42 and 1337).
 const MAX_PRED_SIGMA_S: f64 = 2e-6;
+/// Reuse a cached fit until this many new observations arrive.
+const REFIT_EVERY: u32 = 8;
 
 impl PairModel {
     pub fn push(&mut self, t_from: f64, t_to: f64) {
-        self.obs.push((t_from, t_to));
-        // Expire by from-clock age; cap for memory.
+        self.obs.push_back((t_from, t_to));
+        self.stale += 1;
         let cutoff = t_from - WINDOW_S;
-        self.obs.retain(|(a, _)| *a >= cutoff);
-        if self.obs.len() > MAX_OBS {
-            let excess = self.obs.len() - MAX_OBS;
-            self.obs.drain(..excess);
+        while self.obs.front().is_some_and(|(a, _)| *a < cutoff) {
+            self.obs.pop_front();
+        }
+        while self.obs.len() > MAX_OBS {
+            self.obs.pop_front();
         }
     }
 
@@ -48,28 +59,32 @@ impl PairModel {
     /// or a multipath-stamped reception poisons a democratic fit wholesale —
     /// the hostile bench measured 2× accuracy loss before trimming. The
     /// oracle's clocktrack rejects sync outliers for the same reason.
-    pub fn convert(&self, t_from: f64) -> Option<(f64, f64)> {
+    pub fn convert(&mut self, t_from: f64) -> Option<(f64, f64)> {
         let n = self.obs.len();
         if n < MIN_OBS {
             return None;
         }
-        let span = self.obs.last()?.0 - self.obs.first()?.0;
+        let span = self.obs.back()?.0 - self.obs.front()?.0;
         if span < MIN_SPAN_S {
             return None;
         }
-        let first = fit(&self.obs)?;
-        let cut = (3.0 * first.sigma_fit).max(500e-9);
-        let kept: Vec<(f64, f64)> = self
-            .obs
-            .iter()
-            .filter(|(a, b)| (b - (first.alpha + first.beta * a)).abs() <= cut)
-            .copied()
-            .collect();
-        let f = if kept.len() >= MIN_OBS && kept.len() < n {
-            fit(&kept)?
-        } else {
-            first
-        };
+        if self.cached.is_none() || self.stale >= REFIT_EVERY {
+            let all: Vec<(f64, f64)> = self.obs.iter().copied().collect();
+            let first = fit(&all)?;
+            let cut = (3.0 * first.sigma_fit).max(500e-9);
+            let kept: Vec<(f64, f64)> = all
+                .iter()
+                .filter(|(a, b)| (b - (first.alpha + first.beta * a)).abs() <= cut)
+                .copied()
+                .collect();
+            self.cached = Some(if kept.len() >= MIN_OBS && kept.len() < n {
+                fit(&kept)?
+            } else {
+                first
+            });
+            self.stale = 0;
+        }
+        let f = self.cached.as_ref().expect("just set");
         // Prediction interval: inflates for young or extrapolating models —
         // exactly the phases where km-scale errors hid behind tiny fit
         // residuals (bench, seeds 42 + 1337).
@@ -165,7 +180,10 @@ mod tests {
             "residual poison: {} ns",
             (got - want).abs() * 1e9
         );
-        assert!(sigma < 500e-9, "sigma should reflect the clean fit: {sigma}");
+        assert!(
+            sigma < 500e-9,
+            "sigma should reflect the clean fit: {sigma}"
+        );
     }
 
     #[test]

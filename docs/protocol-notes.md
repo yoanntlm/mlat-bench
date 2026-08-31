@@ -96,6 +96,23 @@ field [2] tracks the measured pairwise clock offset in ppm — observed values
 matched the scenario's simulated ppm offsets to within rounding (rx-001
 (+3.2) vs rx-002 (−7.8) reported ≈ −11). Treat everything else as opaque.
 
+## Why MAX_SYNC_AC = 15 exists (2026-08-31, learned the hard way)
+
+The oracle caps sync work per aircraft (config.py MAX_SYNC_AC = 15,
+MAX_GROUP = 15). Building the candidate revealed why: at 60 co-hearing
+receivers, per-syncpoint pair training is k² — ~7200 model updates per sync
+event, ~10⁶ updates/s at metro scale. Capping reporters at 15 keeps sync
+overkill-good while cutting the work 16×. These constants are congestion
+control, not statistics.
+
+## Oracle behavior under time compression (2026-08-31, observed)
+
+At 5× replay of the 60-receiver metro scenario the oracle produced 31% gross
+ghost positions with 6% coverage at 65% CPU — queue pressure, not algorithm
+failure (see the 2× fairness run in the same day's bench data before citing
+this). Accelerated comparisons at scale must check the oracle's CPU headroom
+or they measure the Python event loop, not MLAT.
+
 ## Open questions
 
 - [ ] `ssync` split-sync: when does the client prefer it, does the oracle need

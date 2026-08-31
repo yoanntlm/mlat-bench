@@ -182,7 +182,13 @@ impl State {
                 created: Instant::now(),
                 reporters: Vec::new(),
             });
-        // Train every pair this receiver now shares the event with.
+        // Train every pair this receiver now shares the event with — capped
+        // at 15 reporters per syncpoint, the oracle's MAX_SYNC_AC. At 60
+        // receivers the uncapped k² training was the metro-scale CPU wall;
+        // 15 receivers' worth of pairings per event is already sync overkill.
+        if sp.reporters.len() >= 15 {
+            return;
+        }
         let others: Vec<(usize, f64, f64)> = sp.reporters.clone();
         sp.reporters.push((rx, te, to));
         for (rx2, te2, to2) in others {
@@ -280,7 +286,7 @@ impl State {
                 Some((t_s, self.receivers[rx].jitter_s))
             } else {
                 self.pairs
-                    .get(&(rx, reference))
+                    .get_mut(&(rx, reference))
                     .and_then(|p| p.convert(t_s))
             };
             if let Some((t, sigma)) = t_ref {
@@ -310,9 +316,9 @@ impl State {
         // One observation per receiver: earliest (direct path; any duplicate
         // within a cluster would be multipath in the real world).
         let mut seen = std::collections::HashSet::new();
-        let mut obs = Vec::new();
-        let mut users = Vec::new();
-        let mut rx_ids = Vec::new();
+        let mut obs: Vec<Observation> = Vec::new();
+        let mut users: Vec<String> = Vec::new();
+        let mut rx_ids: Vec<usize> = Vec::new();
         let mut stamp = f64::INFINITY;
         for &(rx, t, sigma, at_scaled) in cluster {
             if !seen.insert(rx) {
@@ -338,6 +344,18 @@ impl State {
         }
         if obs.len() < 4 {
             return;
+        }
+        // Cap the solve size (oracle: MAX_GROUP=15): beyond ~16 receivers the
+        // extra observations buy almost no geometry but cost quadratic solve
+        // time. Keep the most precise ones.
+        if obs.len() > 16 {
+            let mut idx: Vec<usize> = (0..obs.len()).collect();
+            idx.sort_by(|&a, &b| obs[a].err_s.total_cmp(&obs[b].err_s));
+            idx.truncate(16);
+            idx.sort_unstable();
+            obs = idx.iter().map(|&i| obs[i]).collect();
+            users = idx.iter().map(|&i| users[i].clone()).collect();
+            rx_ids = idx.iter().map(|&i| rx_ids[i]).collect();
         }
         let now_scaled = self.scaled_now();
         let track = *self.tracks.entry(icao).or_default();
