@@ -1,7 +1,9 @@
 //! mlat-bench — replay + benchmark harness for Mode S multilateration servers.
 
+mod beastcmd;
 mod doctor;
 mod gencmd;
+mod locards;
 mod probe;
 mod recordcmd;
 mod runcmd;
@@ -71,6 +73,32 @@ enum Cmd {
     Score { run_dir: std::path::PathBuf },
     /// Summarize a capture (M2).
     Inspect { capture: std::path::PathBuf },
+    /// Replay one capture client's receptions as a Beast TCP stream — food
+    /// for a REAL mlat-client (no SDR needed).
+    BeastServe {
+        capture: std::path::PathBuf,
+        /// Which capture client's receptions to serve (e.g. rx-000).
+        #[arg(long)]
+        client: String,
+        #[arg(long, default_value = "127.0.0.1:31101")]
+        listen: String,
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
+    /// Import a LocaRDS set (real OpenSky receivers + truth) as an MBC capture.
+    ImportLocards {
+        set_csv: std::path::PathBuf,
+        sensors_csv: std::path::PathBuf,
+        #[arg(short, long)]
+        out: std::path::PathBuf,
+        #[arg(long, default_value_t = 600)]
+        duration_s: u64,
+        /// Fraction of aircraft re-emitted as DF4-only MLAT targets.
+        #[arg(long, default_value_t = 0.25)]
+        holdout_frac: f64,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
     /// Transparent proxy tap: record real mlat-client traffic into a capture.
     Record {
         /// Listen address for clients, e.g. 0.0.0.0:40150
@@ -119,6 +147,20 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Cmd::Diff { a, b } => scorecmd::diff(&a, &b),
+        Cmd::BeastServe {
+            capture,
+            client,
+            listen,
+            speed,
+        } => beastcmd::beast_serve(&capture, &client, &listen, speed).await,
+        Cmd::ImportLocards {
+            set_csv,
+            sensors_csv,
+            out,
+            duration_s,
+            holdout_frac,
+            seed,
+        } => locards::import(&set_csv, &sensors_csv, &out, duration_s, holdout_frac, seed),
         Cmd::Score { run_dir } => scorecmd::score(&run_dir),
         Cmd::Record {
             listen,

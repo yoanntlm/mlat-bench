@@ -237,9 +237,14 @@ async fn handle_client(
         jitter_s: if gps { 30e-9 } else { 150e-9 },
     });
     let wants_results = hs["return_results"].as_bool().unwrap_or(false);
+    // Real mlat-client withholds ALL traffic until asked: selective traffic
+    // is not optional politeness, it is the request channel (dress-rehearsal
+    // finding: 5 real clients connected, decoded beast, sent nothing —
+    // "0 of 8 ADS-B used"). Mimic the oracle: enable it, ask for rate
+    // reports, and start_sending every aircraft the client reports.
     let reply = format!(
-        "{{\"compress\":\"{negotiated}\",\"reconnect_in\":300,\"selective_traffic\":false,\
-         \"heartbeat\":true,\"return_results\":{wants_results},\"rate_reports\":false,\
+        "{{\"compress\":\"{negotiated}\",\"reconnect_in\":300,\"selective_traffic\":true,\
+         \"heartbeat\":true,\"return_results\":{wants_results},\"rate_reports\":true,\
          \"motd\":\"mlat-bench candidate mb-server\"}}\n"
     );
     wr.write_all(reply.as_bytes()).await?;
@@ -275,6 +280,7 @@ async fn handle_client(
     } else {
         Some(ZlibFrameDecoder::new())
     };
+    let mut requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         match &mut zdec {
             None => {
@@ -283,7 +289,7 @@ async fn handle_client(
                     _ = hb.tick() => send_heartbeat(&state, &tx_line).await?,
                     r = rd.read_until(b'\n', &mut line) => {
                         if r? == 0 { break }
-                        process_line(&state, rx, &line);
+                        process_line_tx(&state, rx, &line, Some(&tx_line), &mut requested);
                     }
                 }
             }
@@ -309,7 +315,7 @@ async fn handle_client(
                 };
                 for line in chunk.split(|b| *b == b'\n') {
                     if !line.is_empty() {
-                        process_line(&state, rx, line);
+                        process_line_tx(&state, rx, line, Some(&tx_line), &mut requested);
                     }
                 }
             }
@@ -332,9 +338,49 @@ async fn send_heartbeat(
 }
 
 fn process_line(state: &Arc<Mutex<State>>, rx: usize, line: &[u8]) {
+    process_line_tx(state, rx, line, None, &mut std::collections::HashSet::new());
+}
+
+/// Full version: with a write channel, seen/rate_report trigger start_sending
+/// for aircraft not yet requested on this connection.
+fn process_line_tx(
+    state: &Arc<Mutex<State>>,
+    rx: usize,
+    line: &[u8],
+    tx: Option<&tokio::sync::mpsc::Sender<String>>,
+    requested: &mut std::collections::HashSet<String>,
+) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
     };
+    // Aircraft the client offers (seen list / rate_report keys) → request
+    // everything we have not requested yet.
+    if let Some(tx) = tx {
+        let mut fresh: Vec<String> = Vec::new();
+        if let Some(seen) = v.get("seen").and_then(|x| x.as_array()) {
+            for a in seen {
+                if let Some(h) = a.as_str() {
+                    if requested.insert(h.to_lowercase()) {
+                        fresh.push(h.to_lowercase());
+                    }
+                }
+            }
+        }
+        if let Some(rr) = v.get("rate_report").and_then(|x| x.as_object()) {
+            for k in rr.keys() {
+                if requested.insert(k.to_lowercase()) {
+                    fresh.push(k.to_lowercase());
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            let msg = format!(
+                "{{\"start_sending\":{}}}\n",
+                serde_json::to_string(&fresh).unwrap_or_default()
+            );
+            let _ = tx.try_send(msg);
+        }
+    }
     let mut s = state.lock().unwrap();
     if let Some(sy) = v.get("sync") {
         let (Some(et), Some(ot), Some(em), Some(om)) = (
