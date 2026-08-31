@@ -85,7 +85,7 @@ pub struct State {
     /// (bench: flat 148 m error = 0.7 s × ground speed), and real clients
     /// batch exactly like that. Min over many messages converges to true
     /// transport latency; rises slowly to follow reference-clock drift.
-    stamp_offset: Option<f64>,
+    stamp_offset: HashMap<usize, f64>,
     rx_bias: Vec<RxBias>,
     pub receivers: Vec<ReceiverInfo>,
     reference: Option<usize>,
@@ -116,7 +116,7 @@ impl State {
         Ok(State {
             publish,
             adsb_pos: HashMap::new(),
-            stamp_offset: None,
+            stamp_offset: HashMap::new(),
             self_truth_csv: match self_truth_csv {
                 Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
                 None => None,
@@ -335,27 +335,43 @@ impl State {
     const THROTTLE_SCALE_M: f64 = 1_500.0;
 
     fn solve_group(&mut self, g: &Group) {
-        let Some(reference) = self.reference else {
+        // CONTINENTAL-SCALE FIX (LocaRDS, 316 receivers across Europe): a
+        // single global sync reference only serves receivers that co-hear
+        // aircraft with it — everyone else converted to nothing and 2.17M
+        // sync observations produced zero solves. But a message group IS a
+        // locality: its receivers heard the same transmission, so they are
+        // neighbors. Pick the reference PER GROUP — the member with the most
+        // usable direct pair models to the other members.
+        const CLUSTER_SPAN_S: f64 = 2.5e-3;
+
+        let mut members: Vec<usize> = Vec::new();
+        for &(rx, _, _) in &g.entries {
+            if !members.contains(&rx) {
+                members.push(rx);
+            }
+        }
+        if members.len() < 4 {
             return;
-        };
-        // A level-flight aircraft's DF4/DF11 frames are byte-identical across
-        // transmissions, so one content key collects SEVERAL distinct
-        // broadcasts within the window; with packet loss, receivers'
-        // "first" entries can belong to different transmissions. Solving such
-        // a mix blends events ~0.25 s apart and reads as a ~1.5 s × speed
-        // position bias (bench: 300 m bursts at p99). The cure is the
-        // oracle's _cluster_timestamps idea: convert to the common timebase
-        // FIRST, then split into physically consistent clusters — receivers
-        // can only disagree by the network's light-crossing time.
-        const CLUSTER_SPAN_S: f64 = 2.5e-3; // ~500 km network diameter / c
+        }
+        let local_ref = *members
+            .iter()
+            .max_by_key(|&&cand| {
+                members
+                    .iter()
+                    .filter(|&&other| {
+                        other != cand && self.pairs.get(&(other, cand)).is_some_and(|p| p.usable())
+                    })
+                    .count()
+            })
+            .expect("nonempty");
 
         let mut conv: Vec<(usize, f64, f64, f64)> = Vec::new(); // (rx, t_ref, sigma, at_scaled)
         for &(rx, t_s, at_scaled) in &g.entries {
-            let t_ref = if rx == reference {
+            let t_ref = if rx == local_ref {
                 Some((t_s, self.receivers[rx].jitter_s))
             } else {
                 self.pairs
-                    .get_mut(&(rx, reference))
+                    .get_mut(&(rx, local_ref))
                     .and_then(|p| p.convert(t_s))
             };
             if let Some((t, sigma)) = t_ref {
@@ -367,8 +383,6 @@ impl State {
         }
         conv.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-        // Greedy consistent clusters, each solved independently (each is a
-        // distinct physical transmission).
         let mut i = 0;
         while i < conv.len() {
             let start_t = conv[i].1;
@@ -376,7 +390,7 @@ impl State {
             while j < conv.len() && conv[j].1 - start_t <= CLUSTER_SPAN_S {
                 j += 1;
             }
-            self.solve_cluster(g.icao, g.df17, &conv[i..j]);
+            self.solve_cluster(g.icao, g.df17, local_ref, &conv[i..j]);
             i = j;
         }
     }
@@ -385,6 +399,7 @@ impl State {
         &mut self,
         icao: Icao,
         cluster_is_df17: bool,
+        local_ref: usize,
         cluster: &[(usize, f64, f64, f64)],
     ) {
         // One observation per receiver: earliest (direct path; any duplicate
@@ -419,15 +434,16 @@ impl State {
         if obs.len() < 4 {
             return;
         }
-        // Content-time stamping: solved reference time + min-tracked offset.
+        // Content-time stamping: solved reference time + min-tracked offset,
+        // tracked PER reference receiver (each local ref = its own domain).
         let t_ref_min = obs.iter().map(|o| o.t_s).fold(f64::INFINITY, f64::min);
         let delta = stamp - t_ref_min;
-        let off = match self.stamp_offset {
+        let off = match self.stamp_offset.get(&local_ref) {
             None => delta,
-            Some(o) if delta < o => delta, // faster path observed: snap down
-            Some(o) => o + 0.001 * (delta - o), // rise slowly (clock drift)
+            Some(&o) if delta < o => delta, // faster path observed: snap down
+            Some(&o) => o + 0.001 * (delta - o), // rise slowly (clock drift)
         };
-        self.stamp_offset = Some(off);
+        self.stamp_offset.insert(local_ref, off);
         let stamp = t_ref_min + off;
         // Cap the solve size (oracle: MAX_GROUP=15): beyond ~16 receivers the
         // extra observations buy almost no geometry but cost quadratic solve

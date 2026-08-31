@@ -105,6 +105,32 @@ pub fn score(run_dir: &Path) -> Result<()> {
         "score: ghosts {} unknown + {} gross",
         m.ghosts_unknown_icao, m.ghosts_gross_error
     );
+    // Self-truth summary (the field metric: solved DF17s vs the aircraft's
+    // own broadcast positions — works with zero external truth).
+    let st_path = run_dir.join("oracle-work/selftruth.csv");
+    if let Ok(text) = std::fs::read_to_string(&st_path) {
+        let mut errs: Vec<f64> = text
+            .lines()
+            .filter_map(|l| l.split(',').nth(2)?.parse().ok())
+            .collect();
+        errs.sort_by(f64::total_cmp);
+        if !errs.is_empty() {
+            let n = errs.len();
+            let q = |p: f64| errs[((n as f64 * p) as usize).min(n - 1)];
+            println!(
+                "score: self-truth (ADS-B as truth): n={} p50 {:.0} m / p90 {:.0} m",
+                n,
+                q(0.5),
+                q(0.9)
+            );
+            let mut report = std::fs::read_to_string(run_dir.join("report.md")).unwrap_or_default();
+            report.push_str(&format!(
+                "\n## Self-truth (ADS-B aircraft as their own truth)\n\nn={} · p50 {:.0} m · p90 {:.0} m · p99 {:.0} m\n",
+                n, q(0.5), q(0.9), q(0.99)
+            ));
+            let _ = std::fs::write(run_dir.join("report.md"), report);
+        }
+    }
     println!("score: report at {}", run_dir.join("report.md").display());
     Ok(())
 }

@@ -38,6 +38,17 @@ const MAX_PRED_SIGMA_S: f64 = 2e-6;
 const REFIT_EVERY: u32 = 8;
 
 impl PairModel {
+    /// Cheap usability probe (enough observations over enough span) without
+    /// forcing a fit — local-reference election calls this per group member.
+    pub fn usable(&self) -> bool {
+        self.obs.len() >= MIN_OBS
+            && self
+                .obs
+                .back()
+                .zip(self.obs.front())
+                .is_some_and(|(b, f)| b.0 - f.0 >= MIN_SPAN_S)
+    }
+
     /// (observation count, estimated pairwise offset ppm) for status export
     /// (sync.json — existing monitoring tools read the oracle's shape).
     pub fn status(&self) -> (usize, f64) {

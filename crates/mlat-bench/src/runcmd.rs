@@ -55,6 +55,7 @@ pub async fn replay(
     addr: Option<&str>,
     results_csv: Option<&Path>,
     sample_pid: Option<u32>,
+    selftruth_csv: Option<&Path>,
 ) -> Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -68,7 +69,16 @@ pub async fn replay(
     match addr {
         None => replay_capture(capture, &run_dir, speed).await,
         Some(addr) => {
-            replay_external(capture, &run_dir, speed, addr, results_csv, sample_pid).await
+            replay_external(
+                capture,
+                &run_dir,
+                speed,
+                addr,
+                results_csv,
+                sample_pid,
+                selftruth_csv,
+            )
+            .await
         }
     }
 }
@@ -85,6 +95,7 @@ async fn replay_external(
     addr: &str,
     results_csv: Option<&Path>,
     sample_pid: Option<u32>,
+    selftruth_csv: Option<&Path>,
 ) -> Result<()> {
     anyhow::ensure!((1.0..=100.0).contains(&speed), "speed must be in 1..=100");
     let reader = Arc::new(CaptureReader::open(capture).map_err(|e| anyhow::anyhow!("{e}"))?);
@@ -114,6 +125,9 @@ async fn replay_external(
             Ok(_) => {}
             Err(e) => println!("replay: could not copy {}: {e}", csv.display()),
         }
+    }
+    if let Some(st) = selftruth_csv {
+        let _ = std::fs::copy(st, run_dir.join("oracle-work/selftruth.csv"));
     }
     let status = if result.is_ok() { "ok" } else { "failed" };
     std::fs::write(
@@ -161,8 +175,15 @@ async fn drive_clients_only(
                 .with_context(|| format!("client {}", entry.id))
         }));
     }
+    let mut failed = 0u32;
     for t in tasks {
-        t.await??;
+        if let Err(e) = t.await? {
+            failed += 1;
+            println!("run: CLIENT FAILED (continuing): {e:#}");
+        }
+    }
+    if failed > 0 {
+        println!("run: {failed} clients failed");
     }
     sleep_until(stop_at).await;
     println!(
@@ -301,10 +322,17 @@ async fn drive(
         }));
     }
     let n = tasks.len();
+    let mut failed = 0u32;
     for t in tasks {
-        t.await??;
+        if let Err(e) = t.await? {
+            failed += 1;
+            println!("run: CLIENT FAILED (continuing — real networks drop clients): {e:#}");
+        }
     }
-    println!("run: all {n} clients done, draining {DRAIN_S}s for late results");
+    println!(
+        "run: {}/{n} clients done ({failed} failed), draining {DRAIN_S}s for late results",
+        n as u32 - failed
+    );
     sleep_until(stop_at).await;
 
     let _ = sbs_task.await;

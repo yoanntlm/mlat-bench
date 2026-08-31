@@ -63,6 +63,10 @@ enum Cmd {
         /// compare resources with the oracle's.
         #[arg(long)]
         sample_pid: Option<u32>,
+        /// The external server's self-truth CSV; copied into the run dir and
+        /// summarized by score.
+        #[arg(long)]
+        selftruth_csv: Option<std::path::PathBuf>,
     },
     /// Compare two scored runs' metrics.json side by side.
     Diff {
@@ -136,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             addr,
             results_csv,
             sample_pid,
+            selftruth_csv,
         } => {
             runcmd::replay(
                 &capture,
@@ -143,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
                 addr.as_deref(),
                 results_csv.as_deref(),
                 sample_pid,
+                selftruth_csv.as_deref(),
             )
             .await
         }
