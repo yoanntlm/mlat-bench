@@ -1,0 +1,34 @@
+# The candidate as a long-running service — for pointing REAL mlat-clients at.
+#
+# First trial wiring (one receiver): a real ultrafeeder adds
+#   mlat,<this-host>,31090,uuid=<station-uuid>
+# One receiver produces no solves; the point is protocol survival against the
+# only client implementation that counts: handshake, zlib2 framing, ssync and
+# rate_report tolerance, result delivery, staying connected for days.
+#
+# Client port binds 0.0.0.0 inside the container; expose it on the tailnet
+# interface only (set MB_BIND to the tailscale IP), never the public one —
+# same doctrine as every fp stack: a tunnel or the tailnet is the only door.
+
+services:
+  mb-server:
+    build:
+      context: ..
+      dockerfile: candidate/Dockerfile
+    image: mb-server
+    container_name: mb-server
+    restart: unless-stopped
+    command:
+      - --listen=0.0.0.0:31090
+      - --write-csv=/work/results.csv
+      - --basestation-listen=0.0.0.0:31003
+      - --work-dir=/work
+      - --self-truth-csv=/work/selftruth.csv
+    ports:
+      - "${MB_BIND:-127.0.0.1}:31090:31090"   # mlat-client port (tailnet IP in prod)
+      - "127.0.0.1:31003:31003"               # SBS out (readsb ingest, local only)
+    volumes:
+      - ${MB_WORK_DIR:-./work}:/work
+    mem_limit: 512m
+    tmpfs:
+      - /run:size=16M

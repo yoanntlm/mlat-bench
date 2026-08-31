@@ -79,6 +79,13 @@ pub struct State {
     /// ground truth. Rows go here, NOT into results.csv.
     self_truth_csv: Option<std::io::BufWriter<std::fs::File>>,
     pub mlat_adsb: bool,
+    /// Min-tracked offset between the output clock and the reference
+    /// receiver's clock. Results are stamped from the SOLVED reference time
+    /// plus this — arrival-time stamping broke under zlib2's ~1 s batching
+    /// (bench: flat 148 m error = 0.7 s × ground speed), and real clients
+    /// batch exactly like that. Min over many messages converges to true
+    /// transport latency; rises slowly to follow reference-clock drift.
+    stamp_offset: Option<f64>,
     rx_bias: Vec<RxBias>,
     pub receivers: Vec<ReceiverInfo>,
     reference: Option<usize>,
@@ -109,6 +116,7 @@ impl State {
         Ok(State {
             publish,
             adsb_pos: HashMap::new(),
+            stamp_offset: None,
             self_truth_csv: match self_truth_csv {
                 Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
                 None => None,
@@ -411,6 +419,16 @@ impl State {
         if obs.len() < 4 {
             return;
         }
+        // Content-time stamping: solved reference time + min-tracked offset.
+        let t_ref_min = obs.iter().map(|o| o.t_s).fold(f64::INFINITY, f64::min);
+        let delta = stamp - t_ref_min;
+        let off = match self.stamp_offset {
+            None => delta,
+            Some(o) if delta < o => delta, // faster path observed: snap down
+            Some(o) => o + 0.001 * (delta - o), // rise slowly (clock drift)
+        };
+        self.stamp_offset = Some(off);
+        let stamp = t_ref_min + off;
         // Cap the solve size (oracle: MAX_GROUP=15): beyond ~16 receivers the
         // extra observations buy almost no geometry but cost quadratic solve
         // time. Keep the most precise ones.
