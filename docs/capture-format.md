@@ -78,6 +78,9 @@ statistically equivalent.
 
 ## Privacy
 
-Receiver coordinates (manifest AND handshake bytes) identify homes. Do not
-publish recordings of real feeders without their consent; coordinate fuzzing
-is planned but NOT yet implemented — treat every real recording as private.
+Receiver coordinates (manifest and handshake bytes) identify homes. Do not
+publish recordings of real feeders without their consent. `mlat-bench fuzz`
+copies a capture with each receiver moved by a seeded draw inside a radius;
+run it before sharing any real recording, and treat unfuzzed recordings as
+private. A fuzzed capture replays, but its coordinates contradict the
+embedded timestamps, so do not score accuracy against it.

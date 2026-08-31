@@ -2,6 +2,7 @@
 
 mod beastcmd;
 mod doctor;
+mod fuzzcmd;
 mod gencmd;
 mod locards;
 mod probe;
@@ -77,8 +78,8 @@ enum Cmd {
     Score { run_dir: std::path::PathBuf },
     /// Summarize a capture (M2).
     Inspect { capture: std::path::PathBuf },
-    /// Replay one capture client's receptions as a Beast TCP stream — food
-    /// for a REAL mlat-client (no SDR needed).
+    /// Replay one capture client's receptions as a Beast TCP stream, as
+    /// input for a real mlat-client (no SDR needed).
     BeastServe {
         capture: std::path::PathBuf,
         /// Which capture client's receptions to serve (e.g. rx-000).
@@ -100,6 +101,19 @@ enum Cmd {
         /// Fraction of aircraft re-emitted as DF4-only MLAT targets.
         #[arg(long, default_value_t = 0.25)]
         holdout_frac: f64,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Copy a capture with receiver coordinates moved by a seeded draw
+    /// inside a radius (manifest + recorded handshakes). Required before
+    /// sharing a recording of real feeders; see capture-format.md, Privacy.
+    Fuzz {
+        capture: std::path::PathBuf,
+        #[arg(short, long)]
+        out: std::path::PathBuf,
+        /// Maximum displacement per receiver.
+        #[arg(long, default_value_t = 5.0)]
+        radius_km: f64,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -168,6 +182,12 @@ async fn main() -> anyhow::Result<()> {
             seed,
         } => locards::import(&set_csv, &sensors_csv, &out, duration_s, holdout_frac, seed),
         Cmd::Score { run_dir } => scorecmd::score(&run_dir),
+        Cmd::Fuzz {
+            capture,
+            out,
+            radius_km,
+            seed,
+        } => fuzzcmd::fuzz(&capture, &out, radius_km, seed),
         Cmd::Record {
             listen,
             upstream,
