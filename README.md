@@ -66,6 +66,29 @@ but MLAT precision lives in the receiver-clock timestamps *inside* the
 payload, which are fixed at gen time. The oracle itself is not deterministic
 — compare runs via metrics, not bytes.
 
+## The candidate
+
+`crates/mb-server` is a from-scratch Rust MLAT server benched against the
+oracle on identical captures — the comparison the harness exists for. v0 is
+~800 lines: pairwise clock sync (windowed linear fit, star topology to a
+GPS-preferred reference), content-keyed grouping, fixed-altitude Gauss-Newton
+TDOA, hard residual gate. First scored round, same 600 s scenario, 10× replay:
+
+| | oracle | mb-server v0 |
+|---|---|---|
+| results | 1070 | 2017 |
+| p50 error | 27.1 m | **21.8 m** |
+| p90 / p99 | **65.8 / 169 m** | 88.4 / 301 m |
+| ghosts | 0 + 4 gross | 0 + 0 |
+| coverage | 59 % | 81 % |
+
+Read it honestly: the candidate wins median, rate, and ghost count; the
+oracle's tail (p90/p99) is better — that's where its decade of outlier
+heuristics lives, and closing it is the candidate's roadmap. The bench also
+caught the candidate's first real bug in one iteration: results stamped at
+solve time instead of reception time read as a clean 165 m bias at cruise
+speed.
+
 ## Docs
 
 - `docs/protocol-notes.md` — verified wire-protocol facts, with dates

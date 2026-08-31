@@ -31,6 +31,24 @@ pub fn quantize_25ft(alt_ft: f64) -> i32 {
     (((alt_ft + 1000.0) / 25.0).round() as i32) * 25 - 1000
 }
 
+/// Decode AC12 (Q-bit path only; Gillham returns None).
+pub fn ac12_decode(field: u16) -> Option<i32> {
+    if field & 0x010 == 0 {
+        return None;
+    }
+    let n = ((field & 0xFE0) >> 1) | (field & 0x00F);
+    Some(25 * n as i32 - 1000)
+}
+
+/// Decode AC13 (M=0, Q=1 path only).
+pub fn ac13_decode(field: u16) -> Option<i32> {
+    if field & 0x040 != 0 || field & 0x010 == 0 {
+        return None; // metric (M) or Gillham — not emitted by the bench
+    }
+    let n = ((field & 0x1F80) >> 2) | ((field & 0x020) >> 1) | (field & 0x00F);
+    Some(25 * n as i32 - 1000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

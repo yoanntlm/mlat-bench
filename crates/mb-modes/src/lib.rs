@@ -11,7 +11,10 @@
 
 pub mod alt;
 pub mod cpr;
+pub mod decode;
 pub mod frames;
+
+pub use alt::{ac12_decode as alt_ac12_decode, ac13_decode as alt_ac13_decode};
 
 /// Mode S CRC-24 generator polynomial (per Annex 10 Vol IV).
 pub const CRC24_POLY: u32 = 0xFFF409;
