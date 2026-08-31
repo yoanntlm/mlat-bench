@@ -258,7 +258,7 @@ mod tests {
 
         let w = CaptureWriter::create(&dir).unwrap();
         let sha = w.write_scenario_toml("[meta]\nname='x'\n").unwrap();
-        let truth = vec![TruthPoint {
+        let truth = [TruthPoint {
             t: mb_core::SimNanos(1_000_000_000),
             icao: mb_core::Icao(0x3C6444),
             pos: mb_core::Geodetic {
