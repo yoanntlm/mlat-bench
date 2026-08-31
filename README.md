@@ -160,6 +160,33 @@ Two bridges out of the lab:
   out as DF4-only targets the servers must locate. One 10-minute slice:
   1.09 M transmissions, 316 active sensors, 455 holdout aircraft.
 
+### The first real-world round
+
+LocaRDS slice, both servers, identical input, 2× replay:
+
+| 316 real sensors · 455 holdout aircraft · 10 min | oracle | mb-server |
+|---|---|---|
+| positions produced | 28 | **35,639** |
+| p50 error | 98.8 m | **93.7 m** |
+| p90 / p99 | 303 / 394 m | 297 / 994 m |
+| ghost rate | 3/28 | 54/35,639 (0.15 %) |
+| coverage of trackable seconds | ~0 % | **25 %** |
+| CPU / RSS | 40 % / 776 MB | **14 % / 55 MB** |
+
+The unpartitioned oracle cannot digest 316 receivers — which is why real
+deployments shard it; that operational cost is what the candidate's
+architecture avoids. Getting here took two real-data lessons in one
+afternoon: a single global sync reference dies on continental geometry
+(2.17 M sync observations, zero solves — fixed by electing the reference
+PER MESSAGE GROUP, since co-hearing receivers are geographic neighbors),
+and replay must survive the oracle's idle-client reaper like a real network
+survives feeder churn. Self-truth held its calibration on real data too:
+it reports p50 126 m where truth measures 94–101 m.
+
+Open frontier, stated plainly: the real-world p99 (~1 km) and the 0.15 %
+ghost floor — diffuse geometry events, not sensor-attributable (adaptive
+receiver quarantine exists and benched neutral on this slice).
+
 ## Docs
 
 - `docs/protocol-notes.md` — verified wire-protocol facts, with dates

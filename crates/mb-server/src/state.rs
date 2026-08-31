@@ -53,12 +53,17 @@ struct Group {
 #[derive(Clone, Copy, Default)]
 struct RxBias {
     bias_s: f64,
-    /// EMA of squared residual deviation AFTER bias removal — the receiver's
-    /// non-correctable scatter (e.g. the bearing-dependent part of a wrong
-    /// reported position). Feeds the observation weight honestly.
-    var_s2: f64,
+    /// EMA of |residual − bias| — the receiver's non-correctable scatter.
+    /// Above QUARANTINE_MAD_S the receiver is excluded from solves (but its
+    /// bias keeps training, so a recovered sensor re-admits itself). The
+    /// adaptive version of the oracle's blacklist: on LocaRDS, sensor os-495
+    /// participated in ghosts at 13% vs ~0.5% for everyone else.
+    mad_s: f64,
     n: u32,
 }
+
+const QUARANTINE_MAD_S: f64 = 1.5e-6;
+const QUARANTINE_MIN_N: u32 = 30;
 
 /// A published fix, fanned out to CSV + SBS + subscribed clients.
 pub struct Published {
@@ -417,6 +422,9 @@ impl State {
             // measured, so a positive stable residual means this receiver's
             // effective range is modeled too long — advance its clock reading.
             let b = self.rx_bias[rx];
+            if b.n >= QUARANTINE_MIN_N && b.mad_s > QUARANTINE_MAD_S {
+                continue; // quarantined: residual scatter says untrustworthy
+            }
             obs.push(Observation {
                 rx: self.receivers[rx].ecef,
                 t_s: t + b.bias_s,
@@ -460,6 +468,15 @@ impl State {
         let now_scaled = self.scaled_now();
         let track = *self.tracks.entry(icao).or_default();
         if now_scaled - track.last_attempt_scaled < Self::RESOLVE_BACKOFF_S {
+            return;
+        }
+        // The oracle's dof discipline (mlattrack: `elapsed > 30 and dof == 0:
+        // continue`): a 4-receiver fixed-altitude solve has zero redundancy —
+        // no residual can catch a bad observation — so allow it only when the
+        // track is starved. Real-data bench: these zero-dof solves were the
+        // ghost/tail factory (74 gross, p99 1.2 km).
+        if obs.len() == 4 && now_scaled - track.last_time_scaled < 30.0 {
+            self.stats_rejected += 1;
             return;
         }
         let Some(&alt_ft) = self.alts_ft.get(&icao) else {
@@ -514,6 +531,9 @@ impl State {
                 // bench comparison stays apples-to-apples, but DO learn
                 // receiver biases from them — ADS-B traffic is abundant.
                 if is_df17_group {
+                    if sol.err_est_m > Self::MAX_ERR_M {
+                        return; // same ceiling as published fixes
+                    }
                     if sol.residuals_s.len() == rx_ids.len()
                         && rx_ids.len() >= 5
                         && sol.err_est_m < 500.0
@@ -561,8 +581,7 @@ impl State {
                         let k = if b.n < 50 { 0.10 } else { 0.02 };
                         let r = sol.residuals_s[i];
                         b.bias_s += k * r;
-                        let dev = r - b.bias_s;
-                        b.var_s2 += k * (dev * dev - b.var_s2);
+                        b.mad_s += k * ((r - b.bias_s).abs() - b.mad_s);
                         b.n += 1;
                     }
                 }
