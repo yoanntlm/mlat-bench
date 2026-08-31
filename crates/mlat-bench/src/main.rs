@@ -1,6 +1,7 @@
 //! mlat-bench — replay + benchmark harness for Mode S multilateration servers.
 
 mod doctor;
+mod gencmd;
 mod probe;
 
 use clap::{Parser, Subcommand};
@@ -53,12 +54,10 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Doctor => doctor::run().await,
         Cmd::Probe { addr, hold_s } => probe::run(&addr, hold_s).await,
-        Cmd::Gen { .. }
-        | Cmd::Run { .. }
-        | Cmd::Replay { .. }
-        | Cmd::Score { .. }
-        | Cmd::Inspect { .. } => {
-            anyhow::bail!("not implemented yet — see plan milestones (M2+)")
+        Cmd::Gen { scenario, out } => gencmd::gen(&scenario, &out),
+        Cmd::Inspect { capture } => gencmd::inspect(&capture),
+        Cmd::Run { .. } | Cmd::Replay { .. } | Cmd::Score { .. } => {
+            anyhow::bail!("not implemented yet — see plan milestones (M3+)")
         }
     }
 }

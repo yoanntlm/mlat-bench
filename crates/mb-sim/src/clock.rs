@@ -1,0 +1,169 @@
+//! Receiver clock models: true reception time → wire counter value.
+
+use crate::scenario::ClockSpec;
+use rand::Rng;
+use rand_chacha::ChaCha12Rng;
+
+/// 48-bit wrap, like the Beast/dump1090 counter (protocol-notes: wire
+/// timestamps are raw counts; the server treats backwards jumps as resets,
+/// so we also enforce per-connection monotonicity below).
+const WRAP_48: u64 = 1 << 48;
+
+pub struct ClockModel {
+    freq_hz: f64,
+    offset: f64,      // fractional frequency offset (ppm * 1e-6)
+    drift_per_s: f64, // fractional frequency change per second
+    jitter_s: f64,    // 1σ gaussian, seconds
+    start_count: u64,
+    last_count: Option<u64>,
+    wraps: bool,
+}
+
+impl ClockModel {
+    pub fn new(spec: &ClockSpec) -> Self {
+        match *spec {
+            ClockSpec::Dump1090 {
+                offset_ppm,
+                drift_ppm_per_hr,
+                jitter_ns,
+                start_count,
+            } => ClockModel {
+                freq_hz: 12e6,
+                offset: offset_ppm * 1e-6,
+                drift_per_s: drift_ppm_per_hr * 1e-6 / 3600.0,
+                jitter_s: jitter_ns * 1e-9,
+                start_count,
+                last_count: None,
+                wraps: true,
+            },
+            ClockSpec::RadarcapeGps { jitter_ns } => ClockModel {
+                freq_hz: 1e9,
+                offset: 0.0,
+                drift_per_s: 0.0,
+                jitter_s: jitter_ns * 1e-9,
+                start_count: 0,
+                last_count: None,
+                wraps: false,
+            },
+        }
+    }
+
+    pub const fn wire_clock_type(spec: &ClockSpec) -> &'static str {
+        match spec {
+            ClockSpec::Dump1090 { .. } => "dump1090",
+            ClockSpec::RadarcapeGps { .. } => "radarcape_gps",
+        }
+    }
+
+    /// Counter value for a reception at true time t (seconds since T0).
+    /// Integrated phase: freq · (t + offset·t + ½·drift·t²) + jitter.
+    /// Calls must be in nondecreasing t order per clock (receptions are
+    /// processed sorted); monotonicity is clamped so ns-scale jitter can
+    /// never make the wire counter step backwards.
+    pub fn count_at(&mut self, t_s: f64, rng: &mut ChaCha12Rng) -> u64 {
+        let jitter = gaussian(rng) * self.jitter_s;
+        let phase_s = t_s * (1.0 + self.offset) + 0.5 * self.drift_per_s * t_s * t_s + jitter;
+        let raw = self.start_count as f64 + phase_s * self.freq_hz;
+        let mut count = if self.wraps {
+            (raw.round() as i128).rem_euclid(WRAP_48 as i128) as u64
+        } else {
+            raw.round().max(0.0) as u64
+        };
+        if let Some(prev) = self.last_count {
+            // Monotonic clamp — but never across a legitimate 48-bit wrap.
+            let wrapped = self.wraps && prev > WRAP_48 - (self.freq_hz as u64) && count < prev;
+            if !wrapped && count <= prev {
+                count = prev + 1;
+            }
+        }
+        self.last_count = Some(count);
+        count
+    }
+}
+
+/// Box-Muller from two uniform draws — keeps us off rand_distr for one
+/// gaussian.
+fn gaussian(rng: &mut ChaCha12Rng) -> f64 {
+    let u1: f64 = rng.gen_range(f64::EPSILON..1.0);
+    let u2: f64 = rng.gen_range(0.0..1.0);
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mb_core::rng_for;
+
+    fn spec(offset_ppm: f64) -> ClockSpec {
+        ClockSpec::Dump1090 {
+            offset_ppm,
+            drift_ppm_per_hr: 0.0,
+            jitter_ns: 0.0,
+            start_count: 0,
+        }
+    }
+
+    #[test]
+    fn nominal_frequency() {
+        let mut c = ClockModel::new(&spec(0.0));
+        let mut rng = rng_for(1, "t");
+        assert_eq!(c.count_at(1.0, &mut rng), 12_000_000);
+        assert_eq!(c.count_at(10.0, &mut rng), 120_000_000);
+    }
+
+    #[test]
+    fn offset_accumulates() {
+        // +100 ppm: after 100 s the clock is 10 ms (120000 counts) ahead.
+        let mut c = ClockModel::new(&spec(100.0));
+        let mut rng = rng_for(1, "t");
+        let n = c.count_at(100.0, &mut rng);
+        assert_eq!(n, 1_200_120_000);
+    }
+
+    #[test]
+    fn drift_is_quadratic() {
+        let mut c = ClockModel::new(&ClockSpec::Dump1090 {
+            offset_ppm: 0.0,
+            drift_ppm_per_hr: 3600.0, // 1 ppm per second — huge, for arithmetic clarity
+            jitter_ns: 0.0,
+            start_count: 0,
+        });
+        let mut rng = rng_for(1, "t");
+        // phase = t + 0.5 * 1e-6 * t^2 ; t=100 → +0.005 s → +60000 counts
+        assert_eq!(c.count_at(100.0, &mut rng), 1_200_060_000);
+    }
+
+    #[test]
+    fn wraps_at_48_bits() {
+        let mut c = ClockModel::new(&ClockSpec::Dump1090 {
+            offset_ppm: 0.0,
+            drift_ppm_per_hr: 0.0,
+            jitter_ns: 0.0,
+            start_count: (1u64 << 48) - 6_000_000, // 0.5 s before wrap
+        });
+        let mut rng = rng_for(1, "t");
+        let before = c.count_at(0.25, &mut rng);
+        let after = c.count_at(1.0, &mut rng);
+        assert!(before > after, "counter must wrap: {before} then {after}");
+        assert_eq!(after, 6_000_000);
+    }
+
+    #[test]
+    fn monotonic_under_jitter() {
+        let mut c = ClockModel::new(&ClockSpec::Dump1090 {
+            offset_ppm: 0.0,
+            drift_ppm_per_hr: 0.0,
+            jitter_ns: 500.0,
+            start_count: 0,
+        });
+        let mut rng = rng_for(1, "t");
+        let mut prev = 0;
+        // Receptions 1 µs apart — jitter (500 ns σ) would reorder freely
+        // without the clamp.
+        for i in 1..2000 {
+            let n = c.count_at(i as f64 * 1e-6, &mut rng);
+            assert!(n > prev, "step {i}: {n} <= {prev}");
+            prev = n;
+        }
+    }
+}
