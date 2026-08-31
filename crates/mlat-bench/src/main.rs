@@ -36,9 +36,33 @@ enum Cmd {
         out: std::path::PathBuf,
     },
     /// Generate + replay + score in one go (M3/M4).
-    Run { scenario: std::path::PathBuf },
-    /// Replay an existing capture against the oracle (M5).
-    Replay { capture: std::path::PathBuf },
+    Run {
+        scenario: std::path::PathBuf,
+        /// Replay speed multiplier (oracle clock accelerated to match via
+        /// libfaketime). 1 = real time.
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
+    /// Replay an existing capture against the oracle (M5), or against an
+    /// external candidate server with --addr.
+    Replay {
+        capture: std::path::PathBuf,
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        /// Feed an already-running external server at this address instead of
+        /// managing the oracle container. Requires --results-csv.
+        #[arg(long, requires = "results_csv")]
+        addr: Option<String>,
+        /// Where the external server writes its oracle-format results CSV;
+        /// copied into the run dir for scoring.
+        #[arg(long)]
+        results_csv: Option<std::path::PathBuf>,
+    },
+    /// Compare two scored runs' metrics.json side by side.
+    Diff {
+        a: std::path::PathBuf,
+        b: std::path::PathBuf,
+    },
     /// Score an existing run directory (M4).
     Score { run_dir: std::path::PathBuf },
     /// Summarize a capture (M2).
@@ -73,8 +97,14 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Probe { addr, hold_s } => probe::run(&addr, hold_s).await,
         Cmd::Gen { scenario, out } => gencmd::gen(&scenario, &out),
         Cmd::Inspect { capture } => gencmd::inspect(&capture),
-        Cmd::Run { scenario } => runcmd::run(&scenario).await,
-        Cmd::Replay { capture } => runcmd::replay(&capture).await,
+        Cmd::Run { scenario, speed } => runcmd::run(&scenario, speed).await,
+        Cmd::Replay {
+            capture,
+            speed,
+            addr,
+            results_csv,
+        } => runcmd::replay(&capture, speed, addr.as_deref(), results_csv.as_deref()).await,
+        Cmd::Diff { a, b } => scorecmd::diff(&a, &b),
         Cmd::Score { run_dir } => scorecmd::score(&run_dir),
         Cmd::Record {
             listen,

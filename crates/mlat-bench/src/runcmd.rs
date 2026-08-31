@@ -36,7 +36,7 @@ const SBS_ADDR: &str = "127.0.0.1:40148";
 /// Kalman-filtered results can trail the last input by several seconds.
 const DRAIN_S: u64 = 30;
 
-pub async fn run(scenario_path: &Path) -> Result<()> {
+pub async fn run(scenario_path: &Path, speed: f64) -> Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -46,10 +46,15 @@ pub async fn run(scenario_path: &Path) -> Result<()> {
     std::fs::create_dir_all(&run_dir)?;
     let capture_dir = run_dir.join("capture");
     crate::gencmd::gen(scenario_path, &capture_dir)?;
-    replay_capture(&capture_dir, &run_dir).await
+    replay_capture(&capture_dir, &run_dir, speed).await
 }
 
-pub async fn replay(capture: &Path) -> Result<()> {
+pub async fn replay(
+    capture: &Path,
+    speed: f64,
+    addr: Option<&str>,
+    results_csv: Option<&Path>,
+) -> Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -59,10 +64,106 @@ pub async fn replay(capture: &Path) -> Result<()> {
         r.manifest.name, r.manifest.seed
     ));
     std::fs::create_dir_all(&run_dir)?;
-    replay_capture(capture, &run_dir).await
+    match addr {
+        None => replay_capture(capture, &run_dir, speed).await,
+        Some(addr) => replay_external(capture, &run_dir, speed, addr, results_csv).await,
+    }
 }
 
-async fn replay_capture(capture: &Path, run_dir: &Path) -> Result<()> {
+/// Feed an already-running external server (a candidate implementation).
+/// No container lifecycle, no sync.json, no SBS, no resource sampling — the
+/// candidate's only contract is: speak the client protocol, write
+/// oracle-format results CSV to the file passed via --results-csv, and send
+/// heartbeats with server_time (the scoring anchor at speed > 1).
+async fn replay_external(
+    capture: &Path,
+    run_dir: &Path,
+    speed: f64,
+    addr: &str,
+    results_csv: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!((1.0..=100.0).contains(&speed), "speed must be in 1..=100");
+    let reader = Arc::new(CaptureReader::open(capture).map_err(|e| anyhow::anyhow!("{e}"))?);
+    let duration_s = reader.manifest.duration_s;
+    std::fs::create_dir_all(run_dir.join("results"))?;
+    std::fs::create_dir_all(run_dir.join("oracle-work"))?;
+    std::env::set_var("MLAT_BENCH_ORACLE_ADDR", addr);
+
+    let t0 = Instant::now() + Duration::from_secs(2);
+    let wall_t0 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs_f64()
+        + 2.0;
+    let hb_anchor: HbAnchor = Arc::new(std::sync::Mutex::new(None));
+    let result =
+        drive_clients_only(reader, run_dir, duration_s, t0, speed, hb_anchor.clone()).await;
+
+    if let Some(csv) = results_csv {
+        // The scoring layout expects oracle-work/results.csv.
+        match std::fs::copy(csv, run_dir.join("oracle-work/results.csv")) {
+            Ok(_) => {}
+            Err(e) => println!("replay: could not copy {}: {e}", csv.display()),
+        }
+    }
+    let status = if result.is_ok() { "ok" } else { "failed" };
+    std::fs::write(
+        run_dir.join("run.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "status": status,
+            "capture": capture.display().to_string(),
+            "duration_s": duration_s,
+            "wall_t0": wall_t0,
+            "speed": speed,
+            "hb_anchor": *hb_anchor.lock().unwrap(),
+            "external_addr": addr,
+        }))?,
+    )?;
+    println!("run: artifacts in {}", run_dir.display());
+    if result.is_ok() {
+        if let Err(e) = crate::scorecmd::score(run_dir) {
+            println!("run: scoring failed (artifacts intact): {e:#}");
+        }
+    }
+    result
+}
+
+/// The client-feeding core shared with the oracle path, minus the
+/// oracle-specific collectors.
+async fn drive_clients_only(
+    reader: Arc<CaptureReader>,
+    run_dir: &Path,
+    duration_s: u64,
+    t0: Instant,
+    speed: f64,
+    hb_anchor: HbAnchor,
+) -> Result<()> {
+    let stop_at = t0 + Duration::from_secs_f64((duration_s + DRAIN_S) as f64 / speed);
+    let result_count = Arc::new(AtomicU64::new(0));
+    let mut tasks = Vec::new();
+    for entry in reader.manifest.clients.clone() {
+        let reader = reader.clone();
+        let out = run_dir.join(format!("results/{}.jsonl", entry.id));
+        let count = result_count.clone();
+        let anchor = hb_anchor.clone();
+        tasks.push(tokio::spawn(async move {
+            feed_client(&reader, &entry, t0, out, count, speed, anchor)
+                .await
+                .with_context(|| format!("client {}", entry.id))
+        }));
+    }
+    for t in tasks {
+        t.await??;
+    }
+    sleep_until(stop_at).await;
+    println!(
+        "run: {} results returned to clients",
+        result_count.load(Ordering::Relaxed)
+    );
+    Ok(())
+}
+
+async fn replay_capture(capture: &Path, run_dir: &Path, speed: f64) -> Result<()> {
+    anyhow::ensure!((1.0..=100.0).contains(&speed), "speed must be in 1..=100");
     let reader = Arc::new(CaptureReader::open(capture).map_err(|e| anyhow::anyhow!("{e}"))?);
     let duration_s = reader.manifest.duration_s;
     std::fs::create_dir_all(run_dir.join("results"))?;
@@ -77,6 +178,7 @@ async fn replay_capture(capture: &Path, run_dir: &Path) -> Result<()> {
         .arg(&compose)
         .args(["up", "-d", "--wait"])
         .env("ORACLE_WORK_DIR", std::fs::canonicalize(&work_dir)?)
+        .env("ORACLE_SPEED", format_speed(speed))
         .output()
         .await?;
     if !up.status.success() {
@@ -94,7 +196,16 @@ async fn replay_capture(capture: &Path, run_dir: &Path) -> Result<()> {
         + 2.0;
 
     // Teardown guard: whatever happens below, capture logs and stop it.
-    let result = drive(reader.clone(), run_dir, duration_s, t0).await;
+    let hb_anchor: HbAnchor = Arc::new(std::sync::Mutex::new(None));
+    let result = drive(
+        reader.clone(),
+        run_dir,
+        duration_s,
+        t0,
+        speed,
+        hb_anchor.clone(),
+    )
+    .await;
     teardown(&compose, run_dir).await;
     let status = if result.is_ok() { "ok" } else { "failed" };
     std::fs::write(
@@ -104,6 +215,11 @@ async fn replay_capture(capture: &Path, run_dir: &Path) -> Result<()> {
             "capture": capture.display().to_string(),
             "duration_s": duration_s,
             "wall_t0": wall_t0,
+            "speed": speed,
+            // First server heartbeat seen: [our real wall clock, the server's
+            // (possibly faked) server_time]. Scoring at speed>1 maps the
+            // oracle's clock domain back to sim time through this anchor.
+            "hb_anchor": *hb_anchor.lock().unwrap(),
         }))?,
     )?;
     println!("run: artifacts in {}", run_dir.display());
@@ -130,13 +246,26 @@ fn oracle_compose_path() -> Result<PathBuf> {
     }
 }
 
+/// (our real wall time, server's reported server_time) — set once.
+type HbAnchor = Arc<std::sync::Mutex<Option<(f64, f64)>>>;
+
+fn format_speed(speed: f64) -> String {
+    if (speed - speed.round()).abs() < 1e-9 {
+        format!("{}", speed.round() as u64)
+    } else {
+        format!("{speed}")
+    }
+}
+
 async fn drive(
     reader: Arc<CaptureReader>,
     run_dir: &Path,
     duration_s: u64,
     t0: Instant,
+    speed: f64,
+    hb_anchor: HbAnchor,
 ) -> Result<()> {
-    let stop_at = t0 + Duration::from_secs(duration_s + DRAIN_S);
+    let stop_at = t0 + Duration::from_secs_f64((duration_s + DRAIN_S) as f64 / speed);
     let result_count = Arc::new(AtomicU64::new(0));
 
     // ---- background collectors ------------------------------------------
@@ -154,8 +283,9 @@ async fn drive(
         let reader = reader.clone();
         let out = run_dir.join(format!("results/{}.jsonl", entry.id));
         let count = result_count.clone();
+        let anchor = hb_anchor.clone();
         tasks.push(tokio::spawn(async move {
-            feed_client(&reader, &entry, t0, out, count)
+            feed_client(&reader, &entry, t0, out, count, speed, anchor)
                 .await
                 .with_context(|| format!("client {}", entry.id))
         }));
@@ -194,6 +324,8 @@ async fn feed_client(
     t0: Instant,
     results_path: PathBuf,
     result_count: Arc<AtomicU64>,
+    speed: f64,
+    hb_anchor: HbAnchor,
 ) -> Result<()> {
     let mut records = reader
         .client_records(entry)
@@ -244,11 +376,21 @@ async fn feed_client(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64();
-            if matches!(
-                ServerMsg::parse_line(line.as_bytes()),
-                Ok(ServerMsg::Result(_))
-            ) {
-                result_count.fetch_add(1, Ordering::Relaxed);
+            match ServerMsg::parse_line(line.as_bytes()) {
+                Ok(ServerMsg::Result(_)) => {
+                    result_count.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(ServerMsg::Heartbeat {
+                    server_time: Some(st),
+                }) => {
+                    // First heartbeat anchors the oracle's (possibly faked)
+                    // clock to ours for accelerated-run scoring.
+                    let mut a = hb_anchor.lock().unwrap();
+                    if a.is_none() {
+                        *a = Some((now, st));
+                    }
+                }
+                _ => {}
             }
             out.write_all(format!("{{\"t\":{now:.3},\"msg\":{line}}}\n").as_bytes())
                 .await?;
@@ -262,12 +404,13 @@ async fn feed_client(
         if rec.kind != REC_C2S {
             continue;
         }
-        sleep_until(t0 + Duration::from_nanos(rec.t_nanos)).await;
+        sleep_until(t0 + Duration::from_secs_f64(rec.t_nanos as f64 / 1e9 / speed)).await;
         wr.write_all(&rec.payload).await?;
     }
     wr.shutdown().await?;
     // Give the reader a moment to log trailing results for this client.
-    let _ = tokio::time::timeout(Duration::from_secs(DRAIN_S), reader_task).await;
+    let _ =
+        tokio::time::timeout(Duration::from_secs_f64(DRAIN_S as f64 / speed), reader_task).await;
     Ok(())
 }
 

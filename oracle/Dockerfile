@@ -32,6 +32,14 @@ RUN python -m venv /opt/venv \
 
 FROM python:3.11-slim-trixie
 
+# libfaketime enables faster-than-real-time replay: the server's grouping
+# window (MLAT_DELAY, 0.9 s of ITS wall clock) is why real-time replay is
+# otherwise mandatory. Speeding the container clock by the same factor as the
+# replay keeps every internal ratio intact. Verified against a real-time run
+# of the same capture — see docs/protocol-notes.md.
+RUN apt-get update && apt-get install -y --no-install-recommends libfaketime \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/mlat-server /opt/mlat-server
 COPY entrypoint.sh /entrypoint.sh

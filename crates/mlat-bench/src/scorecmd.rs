@@ -15,6 +15,20 @@ pub fn score(run_dir: &Path) -> Result<()> {
     let wall_t0 = run_json["wall_t0"]
         .as_f64()
         .context("run.json lacks wall_t0 (pre-M4 run?)")?;
+    // Accelerated runs: results.csv timestamps are in the oracle's FAKED
+    // clock domain. One observed heartbeat (real r, faked h) anchors the
+    // mapping; sim_t = (t_csv − h) + (r − wall_t0)·speed, folded into an
+    // effective wall_t0 so the scorer below stays unchanged.
+    let speed = run_json["speed"].as_f64().unwrap_or(1.0);
+    let wall_t0 = if speed > 1.0 {
+        let anchor = run_json["hb_anchor"]
+            .as_array()
+            .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+            .context("accelerated run but no heartbeat anchor in run.json")?;
+        anchor.1 - (anchor.0 - wall_t0) * speed
+    } else {
+        wall_t0
+    };
     let capture_path = run_json["capture"]
         .as_str()
         .map(PathBuf::from)
@@ -92,5 +106,52 @@ pub fn score(run_dir: &Path) -> Result<()> {
         m.ghosts_unknown_icao, m.ghosts_gross_error
     );
     println!("score: report at {}", run_dir.join("report.md").display());
+    Ok(())
+}
+
+/// `diff`: two scored runs side by side. Accepts run dirs or metrics.json
+/// paths.
+pub fn diff(a: &Path, b: &Path) -> Result<()> {
+    let load = |p: &Path| -> Result<(String, serde_json::Value)> {
+        let f = if p.is_dir() {
+            p.join("metrics.json")
+        } else {
+            p.to_path_buf()
+        };
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok((name, serde_json::from_str(&std::fs::read_to_string(&f)?)?))
+    };
+    let (na, ma) = load(a)?;
+    let (nb, mb) = load(b)?;
+    let g = |m: &serde_json::Value, path: &[&str]| -> Option<f64> {
+        let mut v = m;
+        for k in path {
+            v = v.get(k)?;
+        }
+        v.as_f64()
+    };
+    let rows: &[(&str, &[&str])] = &[
+        ("results", &["results_total"]),
+        ("matched", &["results_matched"]),
+        ("p50 err (m)", &["horizontal_error_m", "p50"]),
+        ("p90 err (m)", &["horizontal_error_m", "p90"]),
+        ("p99 err (m)", &["horizontal_error_m", "p99"]),
+        ("mean err (m)", &["horizontal_error_m", "mean"]),
+        ("ghosts unknown", &["ghosts_unknown_icao"]),
+        ("ghosts gross", &["ghosts_gross_error"]),
+        ("coverage", &["coverage", "ratio"]),
+        ("cpu mean %", &["resources", "cpu_mean_pct"]),
+        ("rss max MB", &["resources", "mem_max_mb"]),
+    ];
+    println!("{:<16} {:>14} {:>14}", "", na, nb);
+    for (label, path) in rows {
+        let fa = g(&ma, path);
+        let fb = g(&mb, path);
+        let fmt = |v: Option<f64>| v.map_or("—".to_string(), |x| format!("{x:.2}"));
+        println!("{:<16} {:>14} {:>14}", label, fmt(fa), fmt(fb));
+    }
     Ok(())
 }

@@ -16,6 +16,9 @@ services:
       ORACLE_CLIENT_PORT: "40147"
       ORACLE_SBS_PORT: "40148"
       ORACLE_SBS_FILTERED_PORT: "40149"
+      # >1 = libfaketime speed multiplier for accelerated replay (set by the
+      # harness's --speed flag; leave at 1 for real time).
+      ORACLE_SPEED: "${ORACLE_SPEED:-1}"
     ports:
       - "127.0.0.1:${ORACLE_CLIENT_PORT:-40147}:40147"
       - "127.0.0.1:${ORACLE_SBS_PORT:-40148}:40148"
