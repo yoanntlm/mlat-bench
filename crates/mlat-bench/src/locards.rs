@@ -27,7 +27,6 @@ use std::path::Path;
 const M_TO_FT: f64 = 3.280_839_895;
 
 struct Sensor {
-    serial: u64,
     geo: Geodetic,
     user: String,
 }
@@ -57,7 +56,6 @@ pub fn import(
         sensors.insert(
             serial,
             Sensor {
-                serial,
                 geo: Geodetic {
                     lat_deg: r[1].parse()?,
                     lon_deg: r[2].parse()?,

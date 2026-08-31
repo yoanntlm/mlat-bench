@@ -337,12 +337,8 @@ async fn send_heartbeat(
     Ok(())
 }
 
-fn process_line(state: &Arc<Mutex<State>>, rx: usize, line: &[u8]) {
-    process_line_tx(state, rx, line, None, &mut std::collections::HashSet::new());
-}
-
-/// Full version: with a write channel, seen/rate_report trigger start_sending
-/// for aircraft not yet requested on this connection.
+/// seen/rate_report trigger start_sending for aircraft not yet requested on
+/// this connection — a real mlat-client withholds everything until asked.
 fn process_line_tx(
     state: &Arc<Mutex<State>>,
     rx: usize,
