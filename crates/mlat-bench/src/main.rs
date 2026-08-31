@@ -3,6 +3,7 @@
 mod doctor;
 mod gencmd;
 mod probe;
+mod runcmd;
 
 use clap::{Parser, Subcommand};
 
@@ -56,8 +57,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Probe { addr, hold_s } => probe::run(&addr, hold_s).await,
         Cmd::Gen { scenario, out } => gencmd::gen(&scenario, &out),
         Cmd::Inspect { capture } => gencmd::inspect(&capture),
-        Cmd::Run { .. } | Cmd::Replay { .. } | Cmd::Score { .. } => {
-            anyhow::bail!("not implemented yet — see plan milestones (M3+)")
+        Cmd::Run { scenario } => runcmd::run(&scenario).await,
+        Cmd::Replay { capture } => runcmd::replay(&capture).await,
+        Cmd::Score { .. } => {
+            anyhow::bail!("not implemented yet — see plan milestone M4")
         }
     }
 }
