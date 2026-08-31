@@ -124,6 +124,9 @@ pub struct Metrics {
     pub schema_version: u32,
     pub results_total: usize,
     pub results_matched: usize,
+    /// Results for aircraft that exist but have no truth (e.g. ADS-B sync
+    /// sources a server also multilaterates). Unscoreable — never ghosts.
+    pub unscored_known_aircraft: usize,
     pub ghosts_unknown_icao: usize,
     pub ghosts_gross_error: usize,
     pub horizontal_error_m: ErrorStats,
@@ -195,8 +198,10 @@ pub fn score(
     wall_t0: f64,
     audibility: &[AudibilitySecond],
     mlat_targets: &HashSet<Icao>,
+    known_untruthed: &HashSet<Icao>,
     resources: &[ResourceSample],
 ) -> Metrics {
+    let mut unscored = 0usize;
     let mut herr: Vec<f64> = Vec::new();
     let mut aerr: Vec<f64> = Vec::new();
     let mut est_ratio: Vec<f64> = Vec::new();
@@ -205,7 +210,11 @@ pub fn score(
 
     for r in rows {
         if !truth.known(r.icao) {
-            ghosts_unknown += 1;
+            if known_untruthed.contains(&r.icao) {
+                unscored += 1;
+            } else {
+                ghosts_unknown += 1;
+            }
             continue;
         }
         let sim_t = r.t_wall - wall_t0;
@@ -306,6 +315,7 @@ pub fn score(
         schema_version: 1,
         results_total: rows.len(),
         results_matched: matched,
+        unscored_known_aircraft: unscored,
         ghosts_unknown_icao: ghosts_unknown,
         ghosts_gross_error: ghosts_gross,
         horizontal_error_m: stats(&herr).unwrap_or(ErrorStats {
@@ -480,7 +490,7 @@ mod tests {
             })
             .collect();
         let targets: HashSet<Icao> = [Icao(0x3944F1)].into();
-        let m = score(&truth, &rows, wall_t0, &aud, &targets, &[]);
+        let m = score(&truth, &rows, wall_t0, &aud, &targets, &HashSet::new(), &[]);
         assert_eq!(m.results_matched, 1);
         assert_eq!(m.ghosts_unknown_icao, 1);
         assert!(

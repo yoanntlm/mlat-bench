@@ -183,14 +183,25 @@ real-data comparison on the identical capture:
 
 | patched oracle vs mb-server | oracle | mb-server |
 |---|---|---|
-| positions | 7,381 | **35,769** |
+| scoreable positions | 6,568 | **35,769** |
 | p50 / p90 / p99 | 135 / 504 / 2,069 m | **94 / 298 / 901 m** |
-| ghost rate | 11.6 % | **0.18 %** |
+| ghost rate | 0.67 % | **0.18 %** |
 | coverage | 4.6 % | **25.1 %** |
 | CPU / RSS | 54 % / 775 MB | **~14 % / 55 MB** |
 
-Roughly: 5× the output at ~30 % better accuracy per percentile, a ~65×
-lower junk rate, on a quarter of the CPU. Also bench-rejected here for
+Second correction (same day): an earlier version of this table showed the
+oracle at an 11.6 % ghost rate — that was OUR scorer mislabeling the
+oracle's 813 legitimate ADS-B multilaterations (no truth rows for sync
+sources) as ghosts. Scoring bugs cut both ways; the scorer now separates
+"unscoreable known aircraft" from ghosts. Honest multipliers: ~5.4× the
+output, ~30–55 % better per percentile, ~3.7× lower junk rate, ~4× CPU,
+14× RSS.
+
+Comparison-target provenance, verified against primary sources: adsb.lol's
+public k8s spec deploys ghcr.io/katlol/mlat-server, a fork of
+wiedehopf/mlat-server that is 25 commits ahead / 0 behind upstream — all 25
+are packaging and ops (Dockerfile, Python bumps, metrics path); the
+algorithms benched here are byte-identical to what that aggregator runs. Also bench-rejected here for
 honesty: alpha-beta track smoothing (`--write-filtered-csv`) LOSES on real
 data (p99 901 → 3,757 m — lag beats smoothing at these update rates);
 the flag stays as an explicitly experimental, currently-losing option. Getting here took two real-data lessons in one

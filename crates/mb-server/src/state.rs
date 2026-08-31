@@ -3,8 +3,8 @@
 //! bottleneck, and the simplicity is worth more than a lock hierarchy.
 
 use crate::clocksync::PairModel;
-use crate::track::TrackFilter;
 use crate::solve::{self, Observation};
+use crate::track::TrackFilter;
 use mb_core::{Ecef, Geodetic, Icao, C_MPS};
 use std::collections::HashMap;
 use std::io::Write;
@@ -404,7 +404,10 @@ impl State {
                     }
                     let hop1 = self.pairs.get_mut(&(rx, h)).and_then(|p| p.convert(t_s));
                     let Some((t1, s1)) = hop1 else { continue };
-                    let hop2 = self.pairs.get_mut(&(h, local_ref)).and_then(|p| p.convert(t1));
+                    let hop2 = self
+                        .pairs
+                        .get_mut(&(h, local_ref))
+                        .and_then(|p| p.convert(t1));
                     let Some((t2, s2)) = hop2 else { continue };
                     let sig = (s1 * s1 + s2 * s2).sqrt();
                     if best.is_none_or(|(_, bs)| sig < bs) {
@@ -659,15 +662,18 @@ impl State {
                 let _ = self.csv.write_all(row.as_bytes());
                 let _ = self.csv.flush();
                 // Smoothed twin: same columns, alpha-beta-filtered position.
-                if self.filtered_csv.is_some() {
-                    let sm = match self.filters.get_mut(&icao) {
+                let sm_for_filtered = if self.filtered_csv.is_some() {
+                    Some(match self.filters.get_mut(&icao) {
                         Some(f) => f.update(sol.pos, stamp, sol.err_est_m),
                         None => {
                             self.filters.insert(icao, TrackFilter::new(sol.pos, stamp));
                             sol.pos
                         }
-                    };
-                    let w = self.filtered_csv.as_mut().expect("checked");
+                    })
+                } else {
+                    None
+                };
+                if let (Some(sm), Some(w)) = (sm_for_filtered, self.filtered_csv.as_mut()) {
                     let _ = w.write_all(
                         format!(
                             "{:.3},{},,,{:.5},{:.5},{},{:.1},{},{},\"{}\",{},\n",

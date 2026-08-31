@@ -61,6 +61,15 @@ pub fn score(run_dir: &Path) -> Result<()> {
         .filter(|a| matches!(a.kind, mb_sim::scenario::AircraftKind::ModesOnly))
         .filter_map(|a| Icao::from_hex(&a.icao))
         .collect();
+    // Aircraft that EXIST but carry no truth (ADS-B sync sources): results
+    // for them are unscoreable, not ghosts. Mislabeling them inflated an
+    // oracle 'ghost rate' 17x in one comparison — scoring bugs cut both ways.
+    let known_untruthed: HashSet<Icao> = sc
+        .aircraft
+        .iter()
+        .filter(|a| !matches!(a.kind, mb_sim::scenario::AircraftKind::ModesOnly))
+        .filter_map(|a| Icao::from_hex(&a.icao))
+        .collect();
 
     let csv = std::fs::read_to_string(run_dir.join("oracle-work/results.csv")).unwrap_or_default();
     let rows = mb_metrics::parse_results_csv(&csv);
@@ -78,7 +87,15 @@ pub fn score(run_dir: &Path) -> Result<()> {
         })
         .collect();
 
-    let m = mb_metrics::score(&truth, &rows, wall_t0, &audibility, &targets, &resources);
+    let m = mb_metrics::score(
+        &truth,
+        &rows,
+        wall_t0,
+        &audibility,
+        &targets,
+        &known_untruthed,
+        &resources,
+    );
 
     std::fs::write(run_dir.join("metrics.json"), serde_json::to_vec_pretty(&m)?)?;
     let name = run_dir

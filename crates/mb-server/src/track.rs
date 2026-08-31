@@ -44,7 +44,11 @@ impl TrackFilter {
         // alpha (standard alpha-beta relation), softened while the track is
         // young so early velocity estimates don't whip.
         let quality = (40.0 / err_est_m.max(30.0)).clamp(0.15, 0.8);
-        let alpha = if self.n < 5 { quality.max(0.5) } else { quality };
+        let alpha = if self.n < 5 {
+            quality.max(0.5)
+        } else {
+            quality
+        };
         let beta = alpha * alpha / (2.0 - alpha);
         let rlat = fix.lat_deg - plat;
         let rlon = fix.lon_deg - plon;
@@ -72,7 +76,11 @@ mod tests {
         // Truth: 1e-3 deg/s northbound. Noisy fixes ±3e-4 deg. The filter
         // should track within the noise floor after warm-up.
         let mut f = TrackFilter::new(
-            Geodetic { lat_deg: 47.0, lon_deg: -1.5, alt_m: 6000.0 },
+            Geodetic {
+                lat_deg: 47.0,
+                lon_deg: -1.5,
+                alt_m: 6000.0,
+            },
             0.0,
         );
         let noise = [3e-4, -2e-4, 1e-4, -3e-4, 2e-4, 0.0, -1e-4, 3e-4];
