@@ -138,11 +138,9 @@ NDJSON lines). The handshake reply itself is always a plain line.
 Found by mlatc: its line-based reader hit binary bytes ~3 s after a zlib2
 handshake (the server's first start_sending batch).
 
-Consequence for mlatd: it currently writes a plain-line downlink on every
-connection. That is correct for `none` and `zlib` and wrong for `zlib2`;
-today it is masked because mlatd's negotiation prefers `none` and
-mlat-client always offers it. For parity (and feeder bandwidth) mlatd
-should prefer zlib2 like the oracle and compress its downlink. Open item.
+Resolved 2026-09-01: mlatd now negotiates zlib2 first (mlat-server's
+order) and compresses its downlink with the same framing, batched up to
+1 s; `zlib` and `none` connections keep the plain-line downlink.
 
 ## Open questions
 

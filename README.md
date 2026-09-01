@@ -280,6 +280,6 @@ wiedehopf maintains the fork in production use.
 - Reduce the real-data p99 (~1 km) and the 0.15 % ghost floor.
 - Measure a 10k-receiver world instead of extrapolating to it.
 - UDP transport and the remaining mlat-server surface (tracked in the
-  mlatd repo); mlatd zlib2 downlink compression for parity.
+  mlatd repo).
 - The remaining mlatc surface: radarcape_gps input, Beast result outputs.
 - Coordinate fuzzing for shareable real recordings.
