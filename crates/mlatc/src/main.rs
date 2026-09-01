@@ -48,6 +48,10 @@ struct Cli {
     alt: String,
     #[arg(long)]
     uuid: Option<String>,
+    /// Write the stats file mlat-client writes: server-pushed per-receiver
+    /// stats plus a one-hour sync-quality history. Updated atomically.
+    #[arg(long)]
+    stats_json: Option<std::path::PathBuf>,
     /// Result output, repeatable: "none", "basestation,listen,PORT",
     /// "beast,listen,PORT", or "beast,connect,HOST:PORT" (what ultrafeeder
     /// uses to feed MLAT positions back into readsb).
@@ -228,6 +232,7 @@ async fn server_session(
         client_version: Some(format!("mlatc {}", env!("CARGO_PKG_VERSION"))),
         selective_traffic: Some(true),
         heartbeat: Some(true),
+        return_stats: cli.stats_json.as_ref().map(|_| true),
     };
     wr.write_all(&hs.to_line()).await?;
     // The handshake reply is always a plain line; compression starts after.
@@ -262,6 +267,7 @@ async fn server_session(
     // zlib2 batches ~1 s of lines per frame; the wire length field caps the
     // uncompressed batch.
     let mut batch: Vec<u8> = Vec::new();
+    let mut stats = StatsFile::default();
     let mut flush = tokio::time::interval(Duration::from_secs(1));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
 
@@ -300,6 +306,12 @@ async fn server_session(
                     ServerMsg::Result(r) => {
                         if let Some(p) = ResultPos::from_json(&r) {
                             let _ = res_tx.send(p);
+                        }
+                    }
+                    ServerMsg::Stats(v) => {
+                        if let Some(path) = &cli.stats_json {
+                            stats.push(v);
+                            stats.write(path);
                         }
                     }
                     _ => {}
@@ -423,6 +435,76 @@ impl ResultPos {
         }
         Some(out)
     }
+}
+
+/// The --stats-json file, as mlat-client builds it: the latest server
+/// push merged with a one-hour history of sync quality.
+#[derive(Default)]
+struct StatsFile {
+    latest: serde_json::Map<String, serde_json::Value>,
+    /// (unix time, state): 1 good sync, 0 no sync, -1 bad sync.
+    history: std::collections::VecDeque<(u64, i8)>,
+    last_bad_sync: u64,
+}
+
+impl StatsFile {
+    fn push(&mut self, v: serde_json::Value) {
+        let now = unix_now();
+        let obj = v.as_object().cloned().unwrap_or_default();
+        let get = |k: &str| obj.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let state = if get("bad_sync_timeout") > 0.0 {
+            self.last_bad_sync = now;
+            -1
+        } else if get("peer_count") > 0.0 {
+            1
+        } else {
+            0
+        };
+        self.history.push_back((now, state));
+        while self
+            .history
+            .front()
+            .is_some_and(|(t, _)| now.saturating_sub(*t) > 3600)
+        {
+            self.history.pop_front();
+        }
+        self.latest = obj;
+    }
+
+    fn write(&self, path: &std::path::Path) {
+        let mut out = self.latest.clone();
+        out.insert("now".into(), unix_now().into());
+        let n = self.history.len() as f64;
+        let (good, bad) = self.history.iter().fold((0.0, 0.0), |(g, b), (_, st)| {
+            (g + f64::from(*st == 1), b + f64::from(*st == -1))
+        });
+        let pct = |x: f64| {
+            if n > 0.0 {
+                serde_json::json!((x / n * 100.0).round())
+            } else {
+                serde_json::json!(-1)
+            }
+        };
+        out.insert("good_sync_percentage_last_hour".into(), pct(good));
+        out.insert("bad_sync_percentage_last_hour".into(), pct(bad));
+        out.insert("last_bad_sync".into(), self.last_bad_sync.into());
+        let tmp = path.with_extension("tmp");
+        let Ok(f) = std::fs::File::create(&tmp) else {
+            return;
+        };
+        if serde_json::to_writer_pretty(std::io::BufWriter::new(f), &serde_json::Value::Object(out))
+            .is_ok()
+        {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Altitude with mlat-client's unit suffixes: bare number or "m" =

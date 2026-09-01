@@ -32,6 +32,7 @@ pub async fn run(addr: &str, hold_s: u64) -> Result<()> {
         client_version: Some(format!("mlat-bench {}", env!("CARGO_PKG_VERSION"))),
         selective_traffic: None,
         heartbeat: None,
+        return_stats: None,
     };
     wr.write_all(&hs.to_line()).await?;
     println!(
