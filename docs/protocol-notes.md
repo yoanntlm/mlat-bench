@@ -142,6 +142,22 @@ Resolved 2026-09-01: mlatd now negotiates zlib2 first (mlat-server's
 order) and compresses its downlink with the same framing, batched up to
 1 s; `zlib` and `none` connections keep the plain-line downlink.
 
+## Beast results output and the stats push (2026-09-01, from source)
+
+mlat-client's Beast results output (output.py BeastConnection) wraps each
+returned position as a synthetic DF18 frame (CF=2, ME type 18, both CPR
+parities carrying the same position, parity appended) in Beast long-frame
+framing with the magic timestamp bytes `FF 00 4D 4C 41 54` ("MLAT") and
+signal 0. Idle connections send an 11-byte Mode-A/C keepalive every 30 s.
+readsb treats the magic timestamp as "MLAT result, do not use for timing".
+mlatc reproduces this byte-exactly (verified by independent decode).
+
+`--stats-json` is not client-side bookkeeping: most fields (peer_count,
+outlier_percent, bad_sync_timeout) arrive in a server→client stats push,
+a wiedehopf protocol extension (jsonclient.py:600 region). A server that
+never sends it gets an empty stats file, not an error. mlatd does not
+emit the push yet; open item below.
+
 ## Open questions
 
 - [ ] `ssync` split-sync: when does the client prefer it, does the oracle need

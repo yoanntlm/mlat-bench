@@ -50,3 +50,4 @@ services:
       - --lat=${RECEIVER_LAT:?}
       - --lon=${RECEIVER_LON:?}
       - --alt=${RECEIVER_ALT:?}
+      - --results=${MLATC_RESULTS:-none}

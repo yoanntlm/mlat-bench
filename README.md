@@ -160,8 +160,12 @@ Verified two ways on the smoke capture, five instances fed by
   protocol fact: zlib2 compresses the server-to-client direction too
   (docs/protocol-notes.md).
 
-Not implemented yet: radarcape_gps and SBS inputs, UDP transport, Beast
-result outputs.
+The Beast results output (`beast,connect` / `beast,listen`) emits the
+same synthetic DF18 frames as the real client, so readsb ingests MLAT
+positions unchanged; verified frame-exact against an independent
+decoder. Not implemented yet: radarcape_gps and SBS inputs, UDP
+transport, and `--stats-json` (its content is pushed by a server-side
+extension mlatd does not emit yet).
 
 ## One binary, world scale
 

@@ -48,7 +48,9 @@ struct Cli {
     alt: String,
     #[arg(long)]
     uuid: Option<String>,
-    /// Result output: "none" or "basestation,listen,PORT". Repeatable.
+    /// Result output, repeatable: "none", "basestation,listen,PORT",
+    /// "beast,listen,PORT", or "beast,connect,HOST:PORT" (what ultrafeeder
+    /// uses to feed MLAT positions back into readsb).
     #[arg(long)]
     results: Vec<String>,
 }
@@ -73,16 +75,26 @@ async fn main() -> Result<()> {
     };
 
     let alt_m = parse_alt(&cli.alt)?;
-    let (sbs_tx, _) = broadcast::channel::<String>(256);
+    let (res_tx, _) = broadcast::channel::<ResultPos>(256);
     let mut want_results = false;
     for spec in &cli.results {
         match spec.split(',').collect::<Vec<_>>().as_slice() {
             ["none"] => {}
             ["basestation", "listen", port] => {
                 want_results = true;
-                spawn_sbs_listener(format!("0.0.0.0:{port}"), sbs_tx.clone()).await?;
+                spawn_sbs_listener(format!("0.0.0.0:{port}"), res_tx.clone()).await?;
             }
-            _ => bail!("--results {spec}: only \"none\" and \"basestation,listen,PORT\""),
+            ["beast", "listen", port] => {
+                want_results = true;
+                spawn_beast_listener(format!("0.0.0.0:{port}"), res_tx.clone()).await?;
+            }
+            ["beast", "connect", addr] => {
+                want_results = true;
+                spawn_beast_connector(addr.to_string(), res_tx.clone());
+            }
+            _ => bail!(
+                "--results {spec}: none, basestation,listen,PORT, beast,listen,PORT, or beast,connect,HOST:PORT"
+            ),
         }
     }
 
@@ -171,7 +183,7 @@ async fn main() -> Result<()> {
             clock_type,
             want_results,
             &mut up_rx,
-            &sbs_tx,
+            &res_tx,
             &ev_tx,
         )
         .await
@@ -192,7 +204,7 @@ async fn server_session(
     clock_type: ClockType,
     want_results: bool,
     up_rx: &mut mpsc::Receiver<ClientMsg>,
-    sbs_tx: &broadcast::Sender<String>,
+    res_tx: &broadcast::Sender<ResultPos>,
     ev_tx: &mpsc::Sender<Ev>,
 ) -> Result<()> {
     let sock = TcpStream::connect(&cli.server)
@@ -286,8 +298,8 @@ async fn server_session(
                     ServerMsg::StartSending(v) => { let _ = ev_tx.send(Ev::Start(v)).await; }
                     ServerMsg::StopSending(v) => { let _ = ev_tx.send(Ev::Stop(v)).await; }
                     ServerMsg::Result(r) => {
-                        if let Some(l) = sbs_line(&r) {
-                            let _ = sbs_tx.send(l);
+                        if let Some(p) = ResultPos::from_json(&r) {
+                            let _ = res_tx.send(p);
                         }
                     }
                     _ => {}
@@ -363,27 +375,54 @@ async fn send_batch(
     Ok(())
 }
 
-async fn spawn_sbs_listener(addr: String, tx: broadcast::Sender<String>) -> Result<()> {
-    let l = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("bind {addr}"))?;
-    println!("mlatc: SBS results on {addr}");
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = l.accept().await else {
-                return;
-            };
-            let mut rx = tx.subscribe();
-            tokio::spawn(async move {
-                while let Ok(line) = rx.recv().await {
-                    if sock.write_all(line.as_bytes()).await.is_err() {
-                        return;
-                    }
+/// One returned MLAT position, fanned out to every result sink.
+#[derive(Clone, Copy, Debug)]
+struct ResultPos {
+    addr: u32,
+    lat: f64,
+    lon: f64,
+    alt_ft: i32,
+}
+
+impl ResultPos {
+    /// From a result message in the "old" format.
+    fn from_json(r: &serde_json::Value) -> Option<ResultPos> {
+        Some(ResultPos {
+            addr: u32::from_str_radix(r.get("addr")?.as_str()?, 16).ok()?,
+            lat: r.get("lat")?.as_f64()?,
+            lon: r.get("lon")?.as_f64()?,
+            alt_ft: r.get("alt").and_then(|a| a.as_f64()).unwrap_or(0.0) as i32,
+        })
+    }
+
+    fn sbs_line(&self) -> String {
+        format!(
+            "MSG,3,1,1,{:06X},1,,,,,,{},,,{:.5},{:.5},,,,,,0\r\n",
+            self.addr, self.alt_ft, self.lat, self.lon
+        )
+    }
+
+    /// The synthetic DF18 pair in Beast framing with the magic MLAT
+    /// timestamp, exactly as mlat-client's Beast results output builds it.
+    fn beast_bytes(&self) -> Option<Vec<u8>> {
+        let pair = mb_modes::frames::df18_position_pair(
+            mb_modes::Icao(self.addr),
+            self.alt_ft,
+            self.lat,
+            self.lon,
+        )?;
+        let mut out = Vec::with_capacity(2 * 40);
+        for f in &pair {
+            out.extend_from_slice(b"\x1A3\xFF\x00MLAT\x00");
+            for &b in f.iter() {
+                out.push(b);
+                if b == 0x1A {
+                    out.push(0x1A);
                 }
-            });
+            }
         }
-    });
-    Ok(())
+        Some(out)
+    }
 }
 
 /// Altitude with mlat-client's unit suffixes: bare number or "m" =
@@ -403,15 +442,81 @@ fn parse_alt(s: &str) -> Result<f64> {
         .map_err(|_| anyhow::anyhow!("--alt {s}: not a number with optional m/ft suffix"))
 }
 
-/// Result message ("old" format) → one SBS MSG,3 line.
-fn sbs_line(r: &serde_json::Value) -> Option<String> {
-    let addr = r.get("addr")?.as_str()?.to_uppercase();
-    let lat = r.get("lat")?.as_f64()?;
-    let lon = r.get("lon")?.as_f64()?;
-    let alt = r.get("alt").and_then(|a| a.as_f64()).unwrap_or(0.0);
-    Some(format!(
-        "MSG,3,1,1,{addr},1,,,,,,{alt:.0},,,{lat:.5},{lon:.5},,,,,,0\r\n"
-    ))
+/// mlat-client's Beast keepalive frame, sent after 30 s of idle.
+const BEAST_KEEPALIVE: &[u8] = b"\x1A1\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
+async fn spawn_sbs_listener(addr: String, tx: broadcast::Sender<ResultPos>) -> Result<()> {
+    let l = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind {addr}"))?;
+    println!("mlatc: SBS results on {addr}");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = l.accept().await else {
+                return;
+            };
+            let mut rx = tx.subscribe();
+            tokio::spawn(async move {
+                while let Ok(p) = rx.recv().await {
+                    if sock.write_all(p.sbs_line().as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    Ok(())
+}
+
+async fn spawn_beast_listener(addr: String, tx: broadcast::Sender<ResultPos>) -> Result<()> {
+    let l = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind {addr}"))?;
+    println!("mlatc: Beast results on {addr}");
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = l.accept().await else {
+                return;
+            };
+            tokio::spawn(beast_pump(sock, tx.subscribe()));
+        }
+    });
+    Ok(())
+}
+
+fn spawn_beast_connector(addr: String, tx: broadcast::Sender<ResultPos>) {
+    tokio::spawn(async move {
+        loop {
+            if let Ok(sock) = TcpStream::connect(&addr).await {
+                println!("mlatc: Beast results connected ({addr})");
+                beast_pump(sock, tx.subscribe()).await;
+                println!("mlatc: Beast results lost ({addr}), retrying");
+            }
+            sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
+async fn beast_pump(mut sock: TcpStream, mut rx: broadcast::Receiver<ResultPos>) {
+    let mut keepalive = tokio::time::interval(Duration::from_secs(30));
+    keepalive.tick().await;
+    loop {
+        tokio::select! {
+            p = rx.recv() => {
+                let Ok(p) = p else { return };
+                let Some(bytes) = p.beast_bytes() else { continue };
+                keepalive.reset();
+                if sock.write_all(&bytes).await.is_err() {
+                    return;
+                }
+            }
+            _ = keepalive.tick() => {
+                if sock.write_all(BEAST_KEEPALIVE).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
