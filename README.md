@@ -259,6 +259,13 @@ purpose:
    multilaterations as ghosts (11.6 %). The scorer now separates
    unscoreable known aircraft from ghosts; the correct oracle ghost rate
    is 0.67 %.
+3. Real-time (1x) replays scored ~35 m worse at p50 than accelerated
+   replays of the same capture. Cause: the scorer applied its
+   heartbeat-based time anchor only to accelerated runs, so at 1x a
+   server-clock skew plus transport latency (measured: 0.69 s) shifted
+   every truth lookup. The anchor now applies at every speed; the
+   production run rescored from 128 m to 92 m. The engine was never
+   slower in real time.
 
 ## Docs
 

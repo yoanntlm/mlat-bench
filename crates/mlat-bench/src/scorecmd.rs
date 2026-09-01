@@ -20,12 +20,17 @@ pub fn score(run_dir: &Path) -> Result<()> {
     // mapping; sim_t = (t_csv − h) + (r − wall_t0)·speed, folded into an
     // effective wall_t0 so the scorer below stays unchanged.
     let speed = run_json["speed"].as_f64().unwrap_or(1.0);
-    let wall_t0 = if speed > 1.0 {
-        let anchor = run_json["hb_anchor"]
-            .as_array()
-            .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
-            .context("accelerated run but no heartbeat anchor in run.json")?;
+    // The anchor measures the server-stamp-clock vs replay-wall relation
+    // directly, so it applies at every speed: at 1x it removes the server's
+    // clock skew and the transport latency that raw wall_t0 keeps (measured
+    // as a +0.69 s stamp bias = tens of meters at jet speed).
+    let wall_t0 = if let Some(anchor) = run_json["hb_anchor"]
+        .as_array()
+        .and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+    {
         anchor.1 - (anchor.0 - wall_t0) * speed
+    } else if speed > 1.0 {
+        anyhow::bail!("accelerated run but no heartbeat anchor in run.json");
     } else {
         wall_t0
     };
