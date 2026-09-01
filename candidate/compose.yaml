@@ -40,7 +40,8 @@ services:
     image: mlatd
     container_name: mlatc
     restart: unless-stopped
-    network_mode: host
+    # "container:<readsb-container>" reaches an unpublished Beast port.
+    network_mode: ${MLATC_NETWORK:-host}
     entrypoint: /usr/local/bin/mlatc
     command:
       - --input-connect=${MLATC_BEAST:-127.0.0.1:30005}
