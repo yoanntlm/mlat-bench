@@ -148,7 +148,14 @@ MLAT servers from a single Beast decode and one aircraft table, each
 server with its own selective-traffic session — the multi-aggregator
 setup that otherwise runs one client process per server. Verified: five
 clients feeding two servers at once; both solved the full scenario
-independently (p50 25 and 37 m).
+independently (p50 25 and 37 m). Measured for the five-aggregator
+feeder role: one mlatc process at 7.5 MB RSS against five Python
+mlat-clients at 108 MB — 14x less memory, one decode instead of five.
+
+Client-zoo conformance for mlatd: the maintained mlat-client 0.4.2
+(verified live on real RF) and the original mutability mlat-client
+0.2.13 both handshake, negotiate zlib2, and run the full sync loop
+against mlatd without errors.
 
 Verified two ways on the smoke capture, five instances fed by
 `beast-serve`:
