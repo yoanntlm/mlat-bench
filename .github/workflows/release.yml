@@ -1,0 +1,29 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTFLAGS="-C linker=rust-lld" cargo build --release --target ${{ matrix.target }} -p mlatd -p mlatc
+      - run: |
+          mkdir out
+          for b in mlatd mlatc; do
+            cp target/${{ matrix.target }}/release/$b out/$b-${{ matrix.target }}
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
