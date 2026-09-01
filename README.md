@@ -178,10 +178,23 @@ build at 2× time compression runs at 4× — a sustained load equivalent to
 3,200 receivers — with unchanged accuracy (p50 48 vs 47 m), ~3.7 cores,
 and 72 MB RSS. Real data does not regress: 35.2k results at p50 96 m on
 LocaRDS with default flags, within a few percent of the pre-shard best; the
-difference is the boundary cost of the partition. `--shard-cell-deg` and
-`--shard-cap` tune the partition to the deployment geometry. From the
-measured per-message cost, ~10k global feeders fit one multi-core box; this
-is an extrapolation, not a measurement.
+difference is the boundary cost of the partition. From the measured
+per-message cost, ~10k global feeders fit one multi-core box; this is an
+extrapolation, not a measurement.
+
+The partition is density-adaptive (2026-09-01): a cell subdivides only
+when it cannot fit in one shard at all, and never below a 2° floor —
+cells smaller than the radius over which receivers co-hear an aircraft
+gave every shard a one-sided view and a measured ~200 m systematic bias.
+A split cell's children always stay on their home shard; capacity (both
+receiver count and message rate) limits only outward growth. An output
+territory gate publishes each fix from exactly the shard that owns the
+solved position, which removed the one-sided border solves the old
+partition silently emitted. Zero-flag results: the lab world matches its
+best (p50 16 m, coverage 83 %), real data holds parity (33.6k results,
+p50 93 m), and the dense 800-receiver world at 4× beats the old default
+on both axes (p50 28 m, coverage 45 %). The old dials remain as
+overrides; nothing needs them.
 
 Three bench bugs were found and fixed during this work, in sequence:
 divergent scaled-clock epochs, timestamps taken after queue lag, and the
@@ -288,8 +301,6 @@ wiedehopf maintains the fork in production use.
 
 ## Roadmap
 
-- Adaptive partition: density-split cells and a rate-weighted shard
-  capacity, so the partition dials become unnecessary.
 - Close the hostile-scenario median gap (80 vs 105 m).
 - Reduce the real-data p99 (~1 km) and the 0.15 % ghost floor.
 - Measure a 10k-receiver world instead of extrapolating to it.
