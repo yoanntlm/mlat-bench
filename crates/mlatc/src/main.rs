@@ -346,6 +346,12 @@ async fn server_session(
         tokio::select! {
             msg = up_rx.recv() => {
                 let Some(msg) = msg else { bail!("engine gone") };
+                if matches!(msg, ClientMsg::ClockReset(_)) {
+                    stats.clock_resets += 1;
+                    if let Some(path) = stats_path {
+                        stats.write(path);
+                    }
+                }
                 let line = msg.to_line();
                 match &mut enc {
                     None => wr.write_all(&line).await?,
@@ -516,6 +522,9 @@ struct StatsFile {
     /// (unix time, state): 1 good sync, 0 no sync, -1 bad sync.
     history: std::collections::VecDeque<(u64, i8)>,
     last_bad_sync: u64,
+    /// Input clock resets observed this session; a rising count points at
+    /// USB power or dongle heat.
+    clock_resets: u64,
 }
 
 impl StatsFile {
@@ -559,6 +568,7 @@ impl StatsFile {
         out.insert("good_sync_percentage_last_hour".into(), pct(good));
         out.insert("bad_sync_percentage_last_hour".into(), pct(bad));
         out.insert("last_bad_sync".into(), self.last_bad_sync.into());
+        out.insert("clock_resets".into(), self.clock_resets.into());
         let tmp = path.with_extension("tmp");
         let Ok(f) = std::fs::File::create(&tmp) else {
             return;
