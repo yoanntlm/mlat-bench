@@ -163,9 +163,10 @@ Verified two ways on the smoke capture, five instances fed by
 The Beast results output (`beast,connect` / `beast,listen`) emits the
 same synthetic DF18 frames as the real client, so readsb ingests MLAT
 positions unchanged; verified frame-exact against an independent
-decoder. Not implemented yet: radarcape_gps and SBS inputs, UDP
-transport, and `--stats-json` (its content is pushed by a server-side
-extension mlatd does not emit yet).
+decoder. `--stats-json` writes the same stats file as the real client,
+from the server's per-receiver stats push (which mlatd now emits; the
+real mlat-client on the live trial writes its stats file from it). Not
+implemented yet: radarcape_gps and SBS inputs, UDP transport.
 
 ## One binary, world scale
 

@@ -155,8 +155,10 @@ mlatc reproduces this byte-exactly (verified by independent decode).
 `--stats-json` is not client-side bookkeeping: most fields (peer_count,
 outlier_percent, bad_sync_timeout) arrive in a server→client stats push,
 a wiedehopf protocol extension (jsonclient.py:600 region). A server that
-never sends it gets an empty stats file, not an error. mlatd does not
-emit the push yet; open item below.
+never sends it gets an empty stats file, not an error. mlatd emits the
+push since 2026-09-01 (15 s cadence, quarantine mapped to
+bad_sync_timeout); verified live: the real mlat-client writes its stats
+file for mlatd exactly as it does for the other aggregators.
 
 ## Open questions
 
