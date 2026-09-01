@@ -32,3 +32,20 @@ services:
     mem_limit: 512m
     tmpfs:
       - /run:size=16M
+
+  # Our client on the same host's readsb, beside the real mlat-client.
+  # Start it with: docker compose --profile own-client up -d
+  mlatc:
+    profiles: [own-client]
+    image: mlatd
+    container_name: mlatc
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: /usr/local/bin/mlatc
+    command:
+      - --input-connect=${MLATC_BEAST:-127.0.0.1:30005}
+      - --server=${MB_BIND:-127.0.0.1}:31090
+      - --user=${MLATC_USER:-mlatc-hub}
+      - --lat=${RECEIVER_LAT:?}
+      - --lon=${RECEIVER_LON:?}
+      - --alt=${RECEIVER_ALT:?}
