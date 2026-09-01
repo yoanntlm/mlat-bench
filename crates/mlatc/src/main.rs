@@ -184,8 +184,14 @@ async fn main() -> Result<()> {
                     }
                 };
                 for (srv, m) in msgs {
-                    if up_txs[srv].send(m).await.is_err() {
-                        return;
+                    // Never block on one server's queue: a stalled server
+                    // must lose its own traffic, not stall the others
+                    // (the head-of-line isolation the process-per-server
+                    // setup had by accident). MLAT traffic is continuous;
+                    // dropped messages cost that server a little sync.
+                    match up_txs[srv].try_send(m) {
+                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => return,
                     }
                 }
             }
