@@ -42,9 +42,10 @@ struct Cli {
     lat: f64,
     #[arg(long, allow_negative_numbers = true)]
     lon: f64,
-    /// Receiver altitude, meters.
+    /// Receiver altitude: meters by default, or with an explicit unit
+    /// ("65m", "213ft") as mlat-client accepts.
     #[arg(long, allow_negative_numbers = true)]
-    alt: f64,
+    alt: String,
     #[arg(long)]
     uuid: Option<String>,
     /// Result output: "none" or "basestation,listen,PORT". Repeatable.
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
         other => bail!("--input-type {other} is not implemented (12 MHz inputs only)"),
     };
 
+    let alt_m = parse_alt(&cli.alt)?;
     let (sbs_tx, _) = broadcast::channel::<String>(256);
     let mut want_results = false;
     for spec in &cli.results {
@@ -196,7 +198,7 @@ async fn server_session(
         compress: vec![Compress::Zlib2, Compress::None],
         lat: cli.lat,
         lon: cli.lon,
-        alt: cli.alt,
+        alt: alt_m,
         clock_type,
         return_results: Some(want_results),
         return_result_format: None,
@@ -371,6 +373,36 @@ async fn spawn_sbs_listener(addr: String, tx: broadcast::Sender<String>) -> Resu
         }
     });
     Ok(())
+}
+
+/// Altitude with mlat-client's unit suffixes: bare number or "m" =
+/// meters, "ft" = feet.
+fn parse_alt(s: &str) -> Result<f64> {
+    let t = s.trim();
+    let (num, scale) = if let Some(n) = t.strip_suffix("ft") {
+        (n, 0.3048)
+    } else if let Some(n) = t.strip_suffix('m') {
+        (n, 1.0)
+    } else {
+        (t, 1.0)
+    };
+    num.trim()
+        .parse::<f64>()
+        .map(|v| v * scale)
+        .map_err(|_| anyhow::anyhow!("--alt {s}: not a number with optional m/ft suffix"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_alt;
+
+    #[test]
+    fn alt_suffixes() {
+        assert_eq!(parse_alt("65").unwrap(), 65.0);
+        assert_eq!(parse_alt("65m").unwrap(), 65.0);
+        assert!((parse_alt("100ft").unwrap() - 30.48).abs() < 1e-9);
+        assert!(parse_alt("65x").is_err());
+    }
 }
 
 /// Result message ("old" format) → one SBS MSG,3 line.
