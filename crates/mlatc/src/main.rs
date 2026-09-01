@@ -83,6 +83,13 @@ async fn main() -> Result<()> {
     };
 
     let alt_m = parse_alt(&cli.alt)?;
+    if cli.uuid.len() > 1 && cli.uuid.len() != cli.server.len() {
+        bail!(
+            "{} --uuid values for {} --server values: give one UUID for all servers, or exactly one per server",
+            cli.uuid.len(),
+            cli.server.len()
+        );
+    }
     let (res_tx, _) = broadcast::channel::<ResultPos>(256);
     let mut want_results = false;
     for spec in &cli.results {
