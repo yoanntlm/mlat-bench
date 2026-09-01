@@ -48,8 +48,10 @@ struct Cli {
     /// ("65m", "213ft") as mlat-client accepts.
     #[arg(long, allow_negative_numbers = true)]
     alt: String,
+    /// Station UUID sent in the handshake. Repeatable: one value applies
+    /// to every server; several match the --server list by position.
     #[arg(long)]
-    uuid: Option<String>,
+    uuid: Vec<String>,
     /// Write the stats file mlat-client writes: server-pushed per-receiver
     /// stats plus a one-hour sync-quality history. Updated atomically.
     #[arg(long)]
@@ -206,6 +208,11 @@ async fn main() -> Result<()> {
         let res_tx = res_tx.clone();
         let ev_tx = ev_tx.clone();
         let stats_path = stats_path_for(&cli, idx);
+        let uuid = match cli.uuid.len() {
+            0 => None,
+            1 => Some(cli.uuid[0].clone()),
+            _ => cli.uuid.get(idx).cloned(),
+        };
         tokio::spawn(async move {
             let addr = cli.server[idx].clone();
             let mut backoff_s = 5.0f64;
@@ -214,6 +221,7 @@ async fn main() -> Result<()> {
                     &cli,
                     idx,
                     &addr,
+                    uuid.clone(),
                     stats_path.as_deref(),
                     alt_m,
                     clock_type,
@@ -259,6 +267,7 @@ async fn server_session(
     cli: &Cli,
     idx: usize,
     addr: &str,
+    uuid: Option<String>,
     stats_path: Option<&std::path::Path>,
     alt_m: f64,
     clock_type: ClockType,
@@ -277,7 +286,7 @@ async fn server_session(
     let hs = Handshake {
         version: 3,
         user: cli.user.clone(),
-        uuid: cli.uuid.clone(),
+        uuid,
         compress: vec![Compress::Zlib2, Compress::None],
         lat: cli.lat,
         lon: cli.lon,
