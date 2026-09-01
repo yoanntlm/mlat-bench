@@ -1,6 +1,5 @@
 //! Environment checks. Each check prints one line; any hard failure exits
-//! non-zero so `doctor` can gate CI and drills, same spirit as
-//! flightportrait's ops check scripts.
+//! non-zero so `doctor` can gate CI and drills.
 
 use anyhow::Result;
 use std::process::Stdio;

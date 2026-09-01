@@ -1,6 +1,6 @@
 //! `record`: a transparent TCP tap between mlat clients and a real server.
 //!
-//! Clients point at us, we pump bytes to the upstream unmodified and write
+//! Clients connect to the proxy; it pumps bytes upstream unmodified and writes
 //! both directions into an MBC capture. The handshake line becomes the
 //! connect record, so a recording replays through the same engine as a
 //! synthetic capture. No truth/audibility files — recordings score only

@@ -247,7 +247,7 @@ async fn replay_capture(capture: &Path, run_dir: &Path, speed: f64) -> Result<()
             "duration_s": duration_s,
             "wall_t0": wall_t0,
             "speed": speed,
-            // First server heartbeat seen: [our real wall clock, the server's
+            // First server heartbeat seen: [local real wall clock, the server's
             // (possibly faked) server_time]. Scoring at speed>1 maps the
             // oracle's clock domain back to sim time through this anchor.
             "hb_anchor": *hb_anchor.lock().unwrap(),
@@ -277,7 +277,7 @@ fn oracle_compose_path() -> Result<PathBuf> {
     }
 }
 
-/// (our real wall time, server's reported server_time) — set once.
+/// (local real wall time, server's reported server_time) — set once.
 type HbAnchor = Arc<std::sync::Mutex<Option<(f64, f64)>>>;
 
 fn format_speed(speed: f64) -> String {

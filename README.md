@@ -288,6 +288,8 @@ wiedehopf maintains the fork in production use.
 
 ## Roadmap
 
+- Adaptive partition: density-split cells and a rate-weighted shard
+  capacity, so the partition dials become unnecessary.
 - Close the hostile-scenario median gap (80 vs 105 m).
 - Reduce the real-data p99 (~1 km) and the 0.15 % ghost floor.
 - Measure a 10k-receiver world instead of extrapolating to it.

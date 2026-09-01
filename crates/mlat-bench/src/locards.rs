@@ -4,8 +4,8 @@
 //! What's real here — the part that matters: sensor geometry and each
 //! sensor's raw nanosecond timestamps, with genuine crowdsourced clock
 //! behavior (offsets, drift, jitter of real hardware). What's synthesized:
-//! the frame BYTES, re-encoded from the row's ground-truth position with our
-//! own encoder — LocaRDS doesn't ship raw messages, and the servers only
+//! the frame bytes, re-encoded from the row's ground-truth position with
+//! the bench's encoder — LocaRDS doesn't ship raw messages, and the servers only
 //! need consistent decodable frames.
 //!
 //! A held-out fraction of aircraft is re-emitted as DF4-only (altitude

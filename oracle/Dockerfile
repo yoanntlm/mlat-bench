@@ -66,7 +66,7 @@ COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.py /healthcheck.py
 
 # Upstream README: keep the numeric libraries single-threaded — the server is
-# asyncio-structured and thread pools only add jitter to what we measure.
+# asyncio-structured and thread pools only add measurement jitter.
 ENV MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 OMP_NUM_THREADS=1
 
 WORKDIR /opt/mlat-server
