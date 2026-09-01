@@ -165,7 +165,17 @@ async fn main() -> Result<()> {
     // Server loop: connect, handshake, pump; reconnect with backoff.
     let mut backoff_s = 5.0f64;
     loop {
-        match server_session(&cli, clock_type, want_results, &mut up_rx, &sbs_tx, &ev_tx).await {
+        match server_session(
+            &cli,
+            alt_m,
+            clock_type,
+            want_results,
+            &mut up_rx,
+            &sbs_tx,
+            &ev_tx,
+        )
+        .await
+        {
             Ok(()) => backoff_s = 5.0,
             Err(e) => eprintln!("mlatc: server session ended: {e:#}"),
         }
@@ -178,6 +188,7 @@ async fn main() -> Result<()> {
 
 async fn server_session(
     cli: &Cli,
+    alt_m: f64,
     clock_type: ClockType,
     want_results: bool,
     up_rx: &mut mpsc::Receiver<ClientMsg>,
@@ -392,6 +403,17 @@ fn parse_alt(s: &str) -> Result<f64> {
         .map_err(|_| anyhow::anyhow!("--alt {s}: not a number with optional m/ft suffix"))
 }
 
+/// Result message ("old" format) → one SBS MSG,3 line.
+fn sbs_line(r: &serde_json::Value) -> Option<String> {
+    let addr = r.get("addr")?.as_str()?.to_uppercase();
+    let lat = r.get("lat")?.as_f64()?;
+    let lon = r.get("lon")?.as_f64()?;
+    let alt = r.get("alt").and_then(|a| a.as_f64()).unwrap_or(0.0);
+    Some(format!(
+        "MSG,3,1,1,{addr},1,,,,,,{alt:.0},,,{lat:.5},{lon:.5},,,,,,0\r\n"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_alt;
@@ -403,15 +425,4 @@ mod tests {
         assert!((parse_alt("100ft").unwrap() - 30.48).abs() < 1e-9);
         assert!(parse_alt("65x").is_err());
     }
-}
-
-/// Result message ("old" format) → one SBS MSG,3 line.
-fn sbs_line(r: &serde_json::Value) -> Option<String> {
-    let addr = r.get("addr")?.as_str()?.to_uppercase();
-    let lat = r.get("lat")?.as_f64()?;
-    let lon = r.get("lon")?.as_f64()?;
-    let alt = r.get("alt").and_then(|a| a.as_f64()).unwrap_or(0.0);
-    Some(format!(
-        "MSG,3,1,1,{addr},1,,,,,,{alt:.0},,,{lat:.5},{lon:.5},,,,,,0\r\n"
-    ))
 }
