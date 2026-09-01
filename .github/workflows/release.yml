@@ -21,7 +21,7 @@ jobs:
       # rust-toolchain.toml pins the toolchain and overrides the action;
       # the target must be added to the pinned toolchain explicitly.
       - run: rustup target add ${{ matrix.target }}
-      - run: RUSTFLAGS="-C linker=rust-lld" cargo build --release --target ${{ matrix.target }} -p mlatd -p mlatc
+      - run: RUSTFLAGS="-C linker=rust-lld -C strip=symbols" cargo build --release --target ${{ matrix.target }} -p mlatd -p mlatc
       - run: |
           mkdir out
           for b in mlatd mlatc; do
