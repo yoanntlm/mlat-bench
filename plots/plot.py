@@ -11,6 +11,8 @@ Reads metrics.json + oracle-work/results.csv + capture truth, writes
 plots/*.png inside the run directory:
   error_cdf.png   — horizontal error CDF
   map.png         — truth tracks vs oracle positions
+  bias.png        — result-to-truth displacement arrows; a systematic
+                    offset shows as parallel arrows, invisible in a CDF
   resources.png   — oracle CPU% over the run
 """
 
@@ -46,6 +48,13 @@ def main() -> int:
     metrics = json.loads((run / "metrics.json").read_text())
     run_json = json.loads((run / "run.json").read_text())
     wall_t0 = run_json["wall_t0"]
+    # The heartbeat anchor measures the server-clock vs replay-wall
+    # relation; it applies at every speed (the scorer learned this the
+    # hard way: raw wall_t0 at 1x carried a 0.69 s bias).
+    speed = run_json.get("speed", 1.0)
+    anchor = run_json.get("hb_anchor")
+    if anchor:
+        wall_t0 = anchor[1] - (anchor[0] - wall_t0) * speed
     capture = Path(run_json.get("capture", run / "capture"))
     if not capture.exists():
         capture = run / "capture"
@@ -103,6 +112,35 @@ def main() -> int:
         ax.grid(True, which="both", alpha=0.3)
         fig.tight_layout()
         fig.savefig(out / "error_cdf.png", dpi=130)
+
+    # ---- bias arrows -----------------------------------------------------
+    pairs = []
+    for t, icao, lat, lon in rows:
+        tp = truth_at(icao, t - wall_t0)
+        if tp and hav_m(lat, lon, tp[0], tp[1]) < 10_000:
+            pairs.append((tp[1], tp[0], lon - tp[1], lat - tp[0]))
+    if pairs:
+        step = max(1, len(pairs) // 400)
+        sample = pairs[::step]
+        fig, ax = plt.subplots(figsize=(7, 7))
+        ax.quiver(
+            [p[0] for p in sample],
+            [p[1] for p in sample],
+            [p[2] for p in sample],
+            [p[3] for p in sample],
+            angles="xy",
+            scale_units="xy",
+            scale=0.05,
+            width=0.002,
+            color="crimson",
+            alpha=0.7,
+        )
+        ax.set_xlabel("longitude")
+        ax.set_ylabel("latitude")
+        ax.set_title(f"truth-to-result displacement, 20x exaggerated (n={len(sample)})")
+        ax.set_aspect("equal")
+        fig.tight_layout()
+        fig.savefig(out / "bias.png", dpi=130)
 
     # ---- map -------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(7, 7))
