@@ -142,8 +142,13 @@ congestion control, not statistics.
 `crates/mlatc` is a Rust MLAT client developed against the same harness: a
 compatible replacement for mutability's mlat-client. Beast input, the
 mlat-client wire protocol out (zlib2 both directions, selective traffic,
-sync pairing, clock_reset, rate reports), and an SBS listener for returned
-positions. mlat-client's flag names.
+sync pairing, clock_reset, rate reports), SBS and Beast result outputs.
+mlat-client's flag names. `--server` repeats: one process feeds several
+MLAT servers from a single Beast decode and one aircraft table, each
+server with its own selective-traffic session — the multi-aggregator
+setup that otherwise runs one client process per server. Verified: five
+clients feeding two servers at once; both solved the full scenario
+independently (p50 25 and 37 m).
 
 Verified two ways on the smoke capture, five instances fed by
 `beast-serve`:

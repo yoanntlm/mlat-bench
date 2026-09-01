@@ -30,9 +30,11 @@ struct Cli {
     /// Beast input to read, host:port (readsb serves this on 30005).
     #[arg(long)]
     input_connect: String,
-    /// MLAT server, host:port.
-    #[arg(long)]
-    server: String,
+    /// MLAT server, host:port. Repeatable: one client feeds several
+    /// servers from a single Beast decode and one aircraft table, each
+    /// server with its own selective-traffic session.
+    #[arg(long, required = true)]
+    server: Vec<String>,
     /// Receiver name sent to the server.
     #[arg(long)]
     user: String,
@@ -63,9 +65,9 @@ enum Ev {
     Receptions(Vec<beast::Reception>),
     InputUp,
     InputDown,
-    Start(Vec<String>),
-    Stop(Vec<String>),
-    ServerReset,
+    Start(usize, Vec<String>),
+    Stop(usize, Vec<String>),
+    ServerReset(usize),
 }
 
 #[tokio::main]
@@ -102,8 +104,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    let n_servers = cli.server.len();
     let (ev_tx, mut ev_rx) = mpsc::channel::<Ev>(1024);
-    let (up_tx, mut up_rx) = mpsc::channel::<ClientMsg>(4096);
+    let mut up_txs = Vec::new();
+    let mut up_rxs = Vec::new();
+    for _ in 0..n_servers {
+        let (tx, rx) = mpsc::channel::<ClientMsg>(4096);
+        up_txs.push(tx);
+        up_rxs.push(rx);
+    }
 
     // Input task: read Beast bytes, decode, forward. Owns its reconnects.
     {
@@ -135,14 +144,15 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Engine task: single owner of the protocol state.
+    // Engine task: single owner of the protocol state, fanning out to the
+    // per-server uplinks.
     {
         let user = cli.user.clone();
         tokio::spawn(async move {
-            let mut eng = Engine::new(&user, Instant::now());
+            let mut eng = Engine::new(&user, Instant::now(), n_servers);
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
-                let msgs = tokio::select! {
+                let msgs: Vec<engine::Outbound> = tokio::select! {
                     _ = tick.tick() => eng.tick(Instant::now()),
                     ev = ev_rx.recv() => {
                         let Some(ev) = ev else { return };
@@ -157,20 +167,24 @@ async fn main() -> Result<()> {
                             }
                             Ev::InputUp => {
                                 eng.input_reset();
-                                vec![ClientMsg::InputConnected("input connected".into())]
+                                (0..n_servers)
+                                    .map(|s| (s, ClientMsg::InputConnected("input connected".into())))
+                                    .collect()
                             }
                             Ev::InputDown => {
                                 eng.input_reset();
-                                vec![ClientMsg::InputDisconnected("input disconnected".into())]
+                                (0..n_servers)
+                                    .map(|s| (s, ClientMsg::InputDisconnected("input disconnected".into())))
+                                    .collect()
                             }
-                            Ev::Start(v) => { eng.start_sending(&v); Vec::new() }
-                            Ev::Stop(v) => { eng.stop_sending(&v); Vec::new() }
-                            Ev::ServerReset => { eng.server_reset(); Vec::new() }
+                            Ev::Start(srv, v) => { eng.start_sending(srv, &v); Vec::new() }
+                            Ev::Stop(srv, v) => { eng.stop_sending(srv, &v); Vec::new() }
+                            Ev::ServerReset(srv) => { eng.server_reset(srv); Vec::new() }
                         }
                     }
                 };
-                for m in msgs {
-                    if up_tx.send(m).await.is_err() {
+                for (srv, m) in msgs {
+                    if up_txs[srv].send(m).await.is_err() {
                         return;
                     }
                 }
@@ -178,32 +192,68 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Server loop: connect, handshake, pump; reconnect with backoff.
-    let mut backoff_s = 5.0f64;
-    loop {
-        match server_session(
-            &cli,
-            alt_m,
-            clock_type,
-            want_results,
-            &mut up_rx,
-            &res_tx,
-            &ev_tx,
-        )
-        .await
-        {
-            Ok(()) => backoff_s = 5.0,
-            Err(e) => eprintln!("mlatc: server session ended: {e:#}"),
-        }
-        let _ = ev_tx.send(Ev::ServerReset).await;
-        while up_rx.try_recv().is_ok() {} // stale traffic is useless
-        sleep(Duration::from_secs_f64(backoff_s)).await;
-        backoff_s = (backoff_s * 2.0).min(60.0);
+    // One session loop per server: connect, handshake, pump; reconnect
+    // with backoff, independently of the other servers.
+    let cli = std::sync::Arc::new(cli);
+    for (idx, mut up_rx) in up_rxs.into_iter().enumerate() {
+        let cli = cli.clone();
+        let res_tx = res_tx.clone();
+        let ev_tx = ev_tx.clone();
+        let stats_path = stats_path_for(&cli, idx);
+        tokio::spawn(async move {
+            let addr = cli.server[idx].clone();
+            let mut backoff_s = 5.0f64;
+            loop {
+                match server_session(
+                    &cli,
+                    idx,
+                    &addr,
+                    stats_path.as_deref(),
+                    alt_m,
+                    clock_type,
+                    want_results,
+                    &mut up_rx,
+                    &res_tx,
+                    &ev_tx,
+                )
+                .await
+                {
+                    Ok(()) => backoff_s = 5.0,
+                    Err(e) => eprintln!("mlatc: [{addr}] session ended: {e:#}"),
+                }
+                let _ = ev_tx.send(Ev::ServerReset(idx)).await;
+                while up_rx.try_recv().is_ok() {} // stale traffic is useless
+                sleep(Duration::from_secs_f64(backoff_s)).await;
+                backoff_s = (backoff_s * 2.0).min(60.0);
+            }
+        });
     }
+    std::future::pending::<()>().await;
+    unreachable!()
 }
 
+/// The stats file for one server: the given path as-is for a single
+/// server; with the server address folded into the name when feeding
+/// several, so each session writes its own file.
+fn stats_path_for(cli: &Cli, idx: usize) -> Option<std::path::PathBuf> {
+    let base = cli.stats_json.as_ref()?;
+    if cli.server.len() == 1 {
+        return Some(base.clone());
+    }
+    let tag: String = cli.server[idx]
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("stats");
+    Some(base.with_file_name(format!("{stem}-{tag}.json")))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn server_session(
     cli: &Cli,
+    idx: usize,
+    addr: &str,
+    stats_path: Option<&std::path::Path>,
     alt_m: f64,
     clock_type: ClockType,
     want_results: bool,
@@ -211,9 +261,9 @@ async fn server_session(
     res_tx: &broadcast::Sender<ResultPos>,
     ev_tx: &mpsc::Sender<Ev>,
 ) -> Result<()> {
-    let sock = TcpStream::connect(&cli.server)
+    let sock = TcpStream::connect(addr)
         .await
-        .with_context(|| format!("connect {}", cli.server))?;
+        .with_context(|| format!("connect {addr}"))?;
     sock.set_nodelay(true)?;
     let (rd, mut wr) = sock.into_split();
     let mut rd = BufReader::new(rd);
@@ -232,7 +282,7 @@ async fn server_session(
         client_version: Some(format!("mlatc {}", env!("CARGO_PKG_VERSION"))),
         selective_traffic: Some(true),
         heartbeat: Some(true),
-        return_stats: cli.stats_json.as_ref().map(|_| true),
+        return_stats: stats_path.map(|_| true),
     };
     wr.write_all(&hs.to_line()).await?;
     // The handshake reply is always a plain line; compression starts after.
@@ -246,8 +296,7 @@ async fn server_session(
     let compress = match ServerMsg::parse_handshake_reply(&first)? {
         ServerMsg::HandshakeAccept { compress, motd, .. } => {
             println!(
-                "mlatc: connected to {} ({compress:?}){}",
-                cli.server,
+                "mlatc: connected to {addr} ({compress:?}){}",
                 motd.map(|m| format!(" — {m}")).unwrap_or_default()
             );
             compress
@@ -301,15 +350,15 @@ async fn server_session(
             line = down.next_line() => {
                 let Some(line) = line? else { bail!("server closed the connection") };
                 match ServerMsg::parse_line(&line)? {
-                    ServerMsg::StartSending(v) => { let _ = ev_tx.send(Ev::Start(v)).await; }
-                    ServerMsg::StopSending(v) => { let _ = ev_tx.send(Ev::Stop(v)).await; }
+                    ServerMsg::StartSending(v) => { let _ = ev_tx.send(Ev::Start(idx, v)).await; }
+                    ServerMsg::StopSending(v) => { let _ = ev_tx.send(Ev::Stop(idx, v)).await; }
                     ServerMsg::Result(r) => {
                         if let Some(p) = ResultPos::from_json(&r) {
                             let _ = res_tx.send(p);
                         }
                     }
                     ServerMsg::Stats(v) => {
-                        if let Some(path) = &cli.stats_json {
+                        if let Some(path) = stats_path {
                             stats.push(v);
                             stats.write(path);
                         }
