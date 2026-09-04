@@ -341,9 +341,18 @@ async fn server_session(
     let mut stats = StatsFile::default();
     let mut flush = tokio::time::interval(Duration::from_secs(1));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    // The stats file is also written on a timer: the original mlat-server
+    // never pushes receiver stats, and a reader (the station's status page)
+    // judges the link by the file's freshness.
+    let mut stats_tick = tokio::time::interval(Duration::from_secs(60));
 
     loop {
         tokio::select! {
+            _ = stats_tick.tick() => {
+                if let Some(path) = stats_path {
+                    stats.write(path);
+                }
+            }
             msg = up_rx.recv() => {
                 let Some(msg) = msg else { bail!("engine gone") };
                 if matches!(msg, ClientMsg::ClockReset(_)) {
@@ -386,6 +395,7 @@ async fn server_session(
                         }
                     }
                     ServerMsg::Stats(v) => {
+                        stats.server_stats = true;
                         if let Some(path) = stats_path {
                             stats.push(v);
                             stats.write(path);
@@ -518,6 +528,9 @@ impl ResultPos {
 /// push merged with a one-hour history of sync quality.
 #[derive(Default)]
 struct StatsFile {
+    /// Whether this server pushes per-receiver stats (mlatd does, the
+    /// original mlat-server does not).
+    server_stats: bool,
     latest: serde_json::Map<String, serde_json::Value>,
     /// (unix time, state): 1 good sync, 0 no sync, -1 bad sync.
     history: std::collections::VecDeque<(u64, i8)>,
@@ -569,6 +582,7 @@ impl StatsFile {
         out.insert("bad_sync_percentage_last_hour".into(), pct(bad));
         out.insert("last_bad_sync".into(), self.last_bad_sync.into());
         out.insert("clock_resets".into(), self.clock_resets.into());
+        out.insert("server_stats".into(), self.server_stats.into());
         let tmp = path.with_extension("tmp");
         let Ok(f) = std::fs::File::create(&tmp) else {
             return;
