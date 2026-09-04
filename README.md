@@ -139,7 +139,8 @@ congestion control, not statistics.
 
 ## The client
 
-`crates/mlatc` is a Rust MLAT client developed against the same harness: a
+`crates/mlatc` is a Rust MLAT client developed against the same harness,
+published standalone at https://github.com/flightportrait/mlatc: a
 compatible replacement for mutability's mlat-client. Beast input, the
 mlat-client wire protocol out (zlib2 both directions, selective traffic,
 sync pairing, clock_reset, rate reports), SBS and Beast result outputs.
