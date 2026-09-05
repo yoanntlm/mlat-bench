@@ -428,11 +428,20 @@ impl Downlink {
             return Ok(Some(l));
         }
         match &mut self.dec {
-            None => {
+            None => loop {
                 let mut line = Vec::new();
                 let n = self.rd.read_until(b'\n', &mut line).await?;
-                Ok((n > 0).then_some(line))
-            }
+                // A partial line means the server closed mid-write; a
+                // blank line (mlat-server sends one now and then) is not a
+                // message.
+                if n == 0 || line.last() != Some(&b'\n') {
+                    return Ok(None);
+                }
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                return Ok(Some(line));
+            },
             Some(dec) => {
                 let mut head = [0u8; 2];
                 if self.rd.read_exact(&mut head).await.is_err() {

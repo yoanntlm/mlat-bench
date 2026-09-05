@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "mb-capture"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hex",
  "mb-core",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "mb-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "rand",
  "rand_chacha",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "mb-metrics"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "mb-core",
  "serde",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "mb-modes"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hex",
  "mb-core",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "mb-proto"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "hex",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "mb-sim"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "mb-core",
  "mb-modes",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "mlat-bench"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "mlatc"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "mlatd"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",

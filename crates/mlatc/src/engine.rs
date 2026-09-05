@@ -25,8 +25,12 @@ use std::time::Instant;
 const FREQ_12MHZ: f64 = 12e6;
 /// Server-side pair-interval limit is 5 s; stay under it.
 const MAX_PAIR_S: f64 = 4.0;
-/// Minimum spacing between sync emissions per aircraft, per server.
-const SYNC_INTERVAL_S: f64 = 1.0;
+/// Minimum spacing between sync emissions per aircraft, per server. Zero:
+/// every valid pair goes out, as mlat-client does; the server rate-limits
+/// pairings itself. A 1 s limit here cost sync peers on a thin sky
+/// (adsb.lol, 2026-09-05: 1 peer against mlat-client's 3 on the same
+/// stream).
+const SYNC_INTERVAL_S: f64 = 0.0;
 const LOST_AFTER_S: f64 = 60.0;
 const RATE_REPORT_S: f64 = 30.0;
 /// A counter that moves backward by more than this is a clock reset
