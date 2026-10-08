@@ -132,6 +132,18 @@ deployments shard regionally by hand. At 5× compression the oracle's ghost
 rate reached 31 % (see docs/protocol-notes.md on time-compression
 fairness).
 
+**Valley** (`scenarios/valley.toml`: four receivers along a line 7 km
+apart with a few hundred metres of scatter, a fifth past the radio horizon
+of low traffic, two helicopters orbiting at 70 and 120 kt and a GA crossing,
+all 6 km off the line; the `orbit` trajectory). Every fix on them is a
+4-receiver solve with the mirror ambiguity a fixed-altitude TDOA fit has
+across a line of receivers. Built after a field report of zig-zag
+helicopter tracks on 4-receiver solves in hilly terrain, and it reproduces
+it: before the lobe test in mlatd's solver, the 70 kt helicopter was
+tracked 12 km away on the far side of the line for the whole run (16 fixes,
+all gross), the track gating its own wrong lobe in; with it, 538 fixes at
+28 m p50 and no gross error.
+
 Rejected ideas stay in the code as comments (unconditional leave-one-out,
 residual-variance weighting) so that they are not retried. The k² growth of
 sync traffic at scale is the reason for the oracle's MAX_SYNC_AC = 15:

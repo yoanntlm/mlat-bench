@@ -31,13 +31,39 @@ impl Trajectory {
                     ..p
                 }
             }
+            Trajectory::Orbit {
+                center,
+                radius_m,
+                gs_kts,
+                clockwise,
+            } => {
+                // Local tangent plane about the centre: an orbit is a few
+                // km across, where the plane and the sphere agree to
+                // centimetres.
+                let omega = gs_kts * KTS_TO_MPS / radius_m.max(1.0);
+                let theta = if *clockwise {
+                    -omega * t_s
+                } else {
+                    omega * t_s
+                };
+                let (east, north) = (radius_m * theta.cos(), radius_m * theta.sin());
+                let m_lat = 111_320.0;
+                let m_lon = m_lat * center[0].to_radians().cos().max(0.05);
+                Geodetic {
+                    lat_deg: center[0] + north / m_lat,
+                    lon_deg: center[1] + east / m_lon,
+                    alt_m: center[2] * FT_TO_M,
+                }
+            }
         }
     }
 
     /// Ground speed in m/s (constant for great-circle legs).
     pub fn gs_mps(&self) -> f64 {
         match self {
-            Trajectory::GreatCircle { gs_kts, .. } => gs_kts * KTS_TO_MPS,
+            Trajectory::GreatCircle { gs_kts, .. } | Trajectory::Orbit { gs_kts, .. } => {
+                gs_kts * KTS_TO_MPS
+            }
         }
     }
 
@@ -63,6 +89,7 @@ impl Trajectory {
                     0.0
                 }
             }
+            Trajectory::Orbit { .. } => 0.0,
         }
     }
 }
@@ -149,6 +176,40 @@ mod tests {
         let p2 = t.position_at(101.0);
         let d = Geodetic { alt_m: 0.0, ..p1 }.haversine_m(&Geodetic { alt_m: 0.0, ..p2 });
         assert!((d - 450.0 * 0.514444).abs() < 1.0, "1s step moved {d} m");
+    }
+
+    #[test]
+    fn an_orbit_keeps_its_radius_and_speed() {
+        let t = Trajectory::Orbit {
+            center: [47.2, -1.5, 1500.0],
+            radius_m: 1500.0,
+            gs_kts: 70.0,
+            clockwise: false,
+        };
+        let c = Geodetic {
+            lat_deg: 47.2,
+            lon_deg: -1.5,
+            alt_m: 0.0,
+        };
+        for &s in &[0.0, 37.0, 150.0, 400.0] {
+            let p = Geodetic {
+                alt_m: 0.0,
+                ..t.position_at(s)
+            };
+            assert!((p.haversine_m(&c) - 1500.0).abs() < 2.0, "r at {s}");
+            let q = Geodetic {
+                alt_m: 0.0,
+                ..t.position_at(s + 1.0)
+            };
+            assert!(
+                (p.haversine_m(&q) - 70.0 * KTS_TO_MPS).abs() < 0.5,
+                "v at {s}"
+            );
+        }
+        // Starts due east, turns left: north of the centre a quarter in.
+        let quarter = std::f64::consts::FRAC_PI_2 * 1500.0 / (70.0 * KTS_TO_MPS);
+        let p = t.position_at(quarter);
+        assert!(p.lat_deg > 47.2 && (p.lon_deg + 1.5).abs() < 1e-4, "{p:?}");
     }
 
     #[test]

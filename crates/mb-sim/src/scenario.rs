@@ -207,6 +207,18 @@ pub enum Trajectory {
         to: [f64; 3],
         gs_kts: f64,
     },
+    /// Level orbit around a point at constant ground speed: the pattern of
+    /// a police or rescue helicopter holding over a scene, or a survey
+    /// aircraft. Starts due east of the centre, turning left (anticlockwise
+    /// seen from above) unless `clockwise`.
+    Orbit {
+        /// [lat_deg, lon_deg, alt_ft]
+        center: [f64; 3],
+        radius_m: f64,
+        gs_kts: f64,
+        #[serde(default)]
+        clockwise: bool,
+    },
 }
 
 impl Scenario {
